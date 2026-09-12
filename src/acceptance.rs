@@ -6,7 +6,9 @@
 //! `report.md` 并以退出码报告结论。A14（独立复核）由外部 Reviewer 完成。
 
 use crate::app_state::GameState;
-use crate::camera::{self, CameraRig, CameraRigRes, WorldRes, DIST_MAX, DIST_MIN, PITCH_MAX, PITCH_MIN};
+use crate::camera::{
+    self, CameraRig, CameraRigRes, WorldRes, DIST_MAX, DIST_MIN, PITCH_MAX, PITCH_MIN,
+};
 use crate::config::AppConfig;
 use crate::diagnostics::{DiagState, TPS};
 use crate::features::{probe_world, FeatureReport};
@@ -15,9 +17,8 @@ use crate::picking::{pick_voxel, Ray, ScriptedRayRes};
 use crate::render::{ChunkMeshes, DebugTintRes};
 use crate::voxel::BlockId;
 use crate::world::World;
-use bevy::ecs::observer::Trigger;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use bevy::render::view::window::screenshot::{Screenshot, ScreenshotCaptured};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -48,10 +49,22 @@ struct Pose {
 
 impl Pose {
     fn surface(focus: Vec3, yaw: f32, pitch: f32, dist: f32) -> Self {
-        Self { focus, yaw, pitch, dist, underground: false }
+        Self {
+            focus,
+            yaw,
+            pitch,
+            dist,
+            underground: false,
+        }
     }
     fn cave(focus: Vec3, yaw: f32, pitch: f32, dist: f32) -> Self {
-        Self { focus, yaw, pitch, dist, underground: true }
+        Self {
+            focus,
+            yaw,
+            pitch,
+            dist,
+            underground: true,
+        }
     }
 }
 
@@ -80,7 +93,6 @@ pub struct Coverage {
     rotate_360: bool,
     border: bool,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Check {
@@ -213,7 +225,9 @@ impl AcceptanceState {
     }
 
     fn t(&self) -> f64 {
-        self.ready_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+        self.ready_at
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
     }
 }
 
@@ -240,7 +254,11 @@ impl Plugin for AcceptancePlugin {
             use std::io::Write;
             if let Ok(mut f) = std::fs::File::create(&hook_path) {
                 let _ = writeln!(f, "{info}");
-                let _ = writeln!(f, "backtrace:\n{}", std::backtrace::Backtrace::force_capture());
+                let _ = writeln!(
+                    f,
+                    "backtrace:\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
             }
         }));
 
@@ -250,8 +268,8 @@ impl Plugin for AcceptancePlugin {
         app.add_systems(
             Update,
             (
-                acceptance_control.before(camera::camera_solve_system),
-                process_shot_queue.after(camera::camera_solve_system),
+                acceptance_control.before(camera::CameraSolve),
+                process_shot_queue.after(camera::CameraSolve),
             )
                 .run_if(in_state(GameState::Ready)),
         );
@@ -280,9 +298,17 @@ fn acceptance_on_ready(
     let _ = std::fs::write(acc.dir.join("features.txt"), features.summary());
 
     // 初始机位：平原视角（热身段）。
-    let start = acc.segments.first().map(|s| s.from).unwrap_or(Pose::surface(Vec3::new(128.0, 60.0, 128.0), 0.6, 0.6, 40.0));
+    let start = acc
+        .segments
+        .first()
+        .map(|s| s.from)
+        .unwrap_or(Pose::surface(Vec3::new(128.0, 60.0, 128.0), 0.6, 0.6, 40.0));
     rig.0 = CameraRig::new(
-        (world.size.x as f32, world.size.y as f32, world.size.z as f32),
+        (
+            world.size.x as f32,
+            world.size.y as f32,
+            world.size.z as f32,
+        ),
         start.focus,
         start.yaw,
         start.pitch,
@@ -290,7 +316,10 @@ fn acceptance_on_ready(
     );
     rig.0.control_locked = true;
     acc.ready_at = Some(Instant::now());
-    info!("[验收] Ready：开始脚本巡航（总时长 ~{}s）", T_FINALIZE + 12.0);
+    info!(
+        "[验收] Ready：开始脚本巡航（总时长 ~{}s）",
+        T_FINALIZE + 12.0
+    );
 }
 
 /// 构建相机脚本时间线：热身 → 8 个固定机位 → 巡航/耐久循环。
@@ -300,26 +329,65 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
     let cz = world.size.z as f32 / 2.0;
     let h = |x: i32, z: i32| world.column_height(x, z).max(1) as f32;
     let fc = |hit: &Option<crate::features::FeatureHit>| {
-        hit.as_ref().map(|f| f.view_center).unwrap_or(Vec3::new(cx, 50.0, cz))
+        hit.as_ref()
+            .map(|f| f.view_center)
+            .unwrap_or(Vec3::new(cx, 50.0, cz))
     };
 
     // ---- 固定机位（每个 5s：2s 过渡 + 3s 稳定，3.5s 处截图）----
     let mut poses: Vec<(Pose, &'static str, bool)> = Vec::new(); // (pose, shot, cut)
     let plains = fc(&features.plains);
-    poses.push((Pose::surface(plains + Vec3::new(0.0, 2.0, 0.0), 0.6, 0.52, 24.0), "A04_01_plains.png", false));
+    poses.push((
+        Pose::surface(plains + Vec3::new(0.0, 2.0, 0.0), 0.6, 0.52, 24.0),
+        "A04_01_plains.png",
+        false,
+    ));
     let hills = fc(&features.hills);
-    poses.push((Pose::surface(hills + Vec3::new(0.0, 4.0, 0.0), 2.2, 0.62, 55.0), "A04_02_hills.png", false));
+    poses.push((
+        Pose::surface(hills + Vec3::new(0.0, 4.0, 0.0), 2.2, 0.62, 55.0),
+        "A04_02_hills.png",
+        false,
+    ));
     let mountain = fc(&features.mountains);
-    poses.push((Pose::surface(mountain + Vec3::new(0.0, 6.0, 0.0), 0.9, 0.78, 120.0), "A04_03_mountain.png", false));
+    poses.push((
+        Pose::surface(mountain + Vec3::new(0.0, 6.0, 0.0), 0.9, 0.78, 120.0),
+        "A04_03_mountain.png",
+        false,
+    ));
     let valley = fc(&features.valleys);
-    poses.push((Pose::surface(valley + Vec3::new(0.0, 6.0, 0.0), 4.0, 1.0, 130.0), "A04_04_valley_management.png", false));
+    poses.push((
+        Pose::surface(valley + Vec3::new(0.0, 6.0, 0.0), 4.0, 1.0, 130.0),
+        "A04_04_valley_management.png",
+        false,
+    ));
     let cliff = fc(&features.cliffs);
-    poses.push((Pose::surface(cliff + Vec3::new(0.0, 3.0, 0.0), 2.4, 0.34, 38.0), "A04_05_cliff.png", false));
+    poses.push((
+        Pose::surface(cliff + Vec3::new(0.0, 3.0, 0.0), 2.4, 0.34, 38.0),
+        "A04_05_cliff.png",
+        false,
+    ));
     let opening = fc(&features.cave_opening);
-    poses.push((Pose::surface(opening + Vec3::new(0.0, 1.0, 0.0), 1.2, 0.72, 16.0), "A04_06_cave_opening.png", false));
+    poses.push((
+        Pose::surface(opening + Vec3::new(0.0, 1.0, 0.0), 1.2, 0.72, 16.0),
+        "A04_06_cave_opening.png",
+        false,
+    ));
     let cave = fc(&features.underground_cave);
-    poses.push((Pose::cave(cave, 0.0, PITCH_MIN, 1.5), "A04_07_underground_cave.png", true));
-    poses.push((Pose::surface(Vec3::new(cx, (world.size.y as f32) * 0.72, cz), 0.0, 1.25, 135.0), "A04_08_chunk_boundaries.png", true));
+    poses.push((
+        Pose::cave(cave, 0.0, PITCH_MIN, 1.5),
+        "A04_07_underground_cave.png",
+        true,
+    ));
+    poses.push((
+        Pose::surface(
+            Vec3::new(cx, (world.size.y as f32) * 0.72, cz),
+            0.0,
+            1.25,
+            135.0,
+        ),
+        "A04_08_chunk_boundaries.png",
+        true,
+    ));
 
     let mut t = T_WARMUP_END;
     let mut prev = poses[0].0;
@@ -358,17 +426,148 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
     let cliff_xz = (cliff.x, cliff.z);
     let open_xz = (opening.x, opening.z);
     let border_x = 20.0f32;
-    let waypoints: Vec<(f32, f32, f32, f32, f32, f32, Coverage, f32)> = vec![
-        (plains_xz.0, plains_xz.1, 4.0, 1.2, 0.55, 35.0, Coverage { cross_chunk: true, ..Default::default() }, 30.0),
-        (hills_xz.0, hills_xz.1, 6.0, 1.4, 0.62, 60.0, Coverage { cross_chunk: true, ..Default::default() }, 35.0),
-        (mtn_xz.0, mtn_xz.1, 8.0, std::f32::consts::TAU, 0.85, 95.0, Coverage { rotate_360: true, cross_chunk: true, ..Default::default() }, 40.0),
-        (valley_xz.0, valley_xz.1, 10.0, 1.0, 0.95, 8.0, Coverage { max_zoom: true, min_zoom: true, cross_chunk: true, ..Default::default() }, 45.0),
-        (valley_xz.0, valley_xz.1, 4.0, 0.8, 0.30, 12.0, Coverage { low_angle: true, cross_chunk: true, ..Default::default() }, 25.0),
-        (cliff_xz.0, cliff_xz.1, 5.0, 1.6, 0.42, 30.0, Coverage { cross_chunk: true, ..Default::default() }, 30.0),
-        (open_xz.0, open_xz.1, 5.0, 1.2, 0.65, 25.0, Coverage { cross_chunk: true, ..Default::default() }, 30.0),
-        (border_x, cz, 12.0, 1.0, 0.85, 70.0, Coverage { border: true, cross_chunk: true, ..Default::default() }, 40.0),
-        (border_x, cz - 80.0, 14.0, 1.2, 1.05, 90.0, Coverage { border: true, cross_chunk: true, ..Default::default() }, 40.0),
-        (cx, cz, 20.0, 2.0, 1.2, 145.0, Coverage { management: true, max_height: true, max_zoom: true, cross_chunk: true, ..Default::default() }, 50.0),
+    // 巡航路点：(focus_x, focus_z, y_offset, yaw_delta, pitch, dist, coverage, arc)
+    type Waypoint = (f32, f32, f32, f32, f32, f32, Coverage, f32);
+    let waypoints: Vec<Waypoint> = vec![
+        (
+            plains_xz.0,
+            plains_xz.1,
+            4.0,
+            1.2,
+            0.55,
+            35.0,
+            Coverage {
+                cross_chunk: true,
+                ..Default::default()
+            },
+            30.0,
+        ),
+        (
+            hills_xz.0,
+            hills_xz.1,
+            6.0,
+            1.4,
+            0.62,
+            60.0,
+            Coverage {
+                cross_chunk: true,
+                ..Default::default()
+            },
+            35.0,
+        ),
+        (
+            mtn_xz.0,
+            mtn_xz.1,
+            8.0,
+            std::f32::consts::TAU,
+            0.85,
+            95.0,
+            Coverage {
+                rotate_360: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            40.0,
+        ),
+        (
+            valley_xz.0,
+            valley_xz.1,
+            10.0,
+            1.0,
+            0.95,
+            8.0,
+            Coverage {
+                max_zoom: true,
+                min_zoom: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            45.0,
+        ),
+        (
+            valley_xz.0,
+            valley_xz.1,
+            4.0,
+            0.8,
+            0.30,
+            12.0,
+            Coverage {
+                low_angle: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            25.0,
+        ),
+        (
+            cliff_xz.0,
+            cliff_xz.1,
+            5.0,
+            1.6,
+            0.42,
+            30.0,
+            Coverage {
+                cross_chunk: true,
+                ..Default::default()
+            },
+            30.0,
+        ),
+        (
+            open_xz.0,
+            open_xz.1,
+            5.0,
+            1.2,
+            0.65,
+            25.0,
+            Coverage {
+                cross_chunk: true,
+                ..Default::default()
+            },
+            30.0,
+        ),
+        (
+            border_x,
+            cz,
+            12.0,
+            1.0,
+            0.85,
+            70.0,
+            Coverage {
+                border: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            40.0,
+        ),
+        (
+            border_x,
+            cz - 80.0,
+            14.0,
+            1.2,
+            1.05,
+            90.0,
+            Coverage {
+                border: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            40.0,
+        ),
+        (
+            cx,
+            cz,
+            20.0,
+            2.0,
+            1.2,
+            145.0,
+            Coverage {
+                management: true,
+                max_height: true,
+                max_zoom: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+            50.0,
+        ),
     ];
     let seg_len = 8.0f64;
     let mut lap = 0usize;
@@ -411,10 +610,16 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
     let mut acts: Vec<(f64, ActionId)> = vec![(T_WARMUP_END, ActionId::StartCollecting)];
     acts.push((T_CRUISE_START + 4.0, ActionId::PickRays));
     acts.push((T_CRUISE_START + 7.0, ActionId::HighlightOn));
-    acts.push((T_CRUISE_START + 9.0, ActionId::Shot("A09_picking_highlight.png")));
+    acts.push((
+        T_CRUISE_START + 9.0,
+        ActionId::Shot("A09_picking_highlight.png"),
+    ));
     acts.push((T_CRUISE_START + 12.0, ActionId::HighlightOff));
     acts.push((T_CRUISE_START + 32.0, ActionId::EditTest));
-    acts.push((T_CRUISE_START + 40.0, ActionId::ShotEdit("A05_edit_rebuild.png")));
+    acts.push((
+        T_CRUISE_START + 40.0,
+        ActionId::ShotEdit("A05_edit_rebuild.png"),
+    ));
     acts.push((T_CRUISE_START + 52.0, ActionId::VerifyEdit));
     acts.push((T_VIEWS_END - 7.0, ActionId::TintOn));
     acts.push((T_VIEWS_END - 1.0, ActionId::TintOff));
@@ -435,6 +640,7 @@ fn smoothstep(u: f64) -> f64 {
 }
 
 /// 主控制器：按时间线驱动机位、执行动作、采集不变量。
+#[allow(clippy::too_many_arguments)]
 fn acceptance_control(
     mut acc: ResMut<AcceptanceState>,
     mut rig: ResMut<CameraRigRes>,
@@ -445,10 +651,12 @@ fn acceptance_control(
     mut tint: ResMut<DebugTintRes>,
     time: Res<Time>,
     next_state: ResMut<NextState<GameState>>,
-    exit: bevy::ecs::event::EventWriter<AppExit>,
+    exit: MessageWriter<AppExit>,
 ) {
     let t = acc.t();
-    let Some(world) = world_res.0.as_mut() else { return; };
+    let Some(world) = world_res.0.as_mut() else {
+        return;
+    };
 
     // ---------- 1. 位姿脚本 ----------
     // 找当前 segment（线性扫描，段数 ~80）。
@@ -508,14 +716,27 @@ fn acceptance_control(
             break;
         }
         let (_, action) = acc.actions.pop_front().unwrap();
-        run_action(&mut acc, &mut diag, &mut tint, &mut scripted_ray, world, action, t);
+        run_action(
+            &mut acc,
+            &mut diag,
+            &mut tint,
+            &mut scripted_ray,
+            world,
+            action,
+            t,
+        );
     }
 
     // ---------- 3. 不变量采样（t >= 热身结束）----------
     if t >= T_WARMUP_END && !acc.finalized {
         let eye = rig.0.eye();
         // 有限性
-        if !eye.is_finite() || !rig.0.focus.is_finite() || !rig.0.dist.is_finite() || !rig.0.pitch.is_finite() || !rig.0.yaw.is_finite() {
+        if !eye.is_finite()
+            || !rig.0.focus.is_finite()
+            || !rig.0.dist.is_finite()
+            || !rig.0.pitch.is_finite()
+            || !rig.0.yaw.is_finite()
+        {
             acc.finite_violations += 1;
         }
         // 限位
@@ -527,7 +748,11 @@ fn acceptance_control(
             acc.clamp_violations += 1;
         }
         // 相机不得在实体内（A08）
-        let v = IVec3::new(eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
+        let v = IVec3::new(
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        );
         if world.size.contains(v) && world.voxel(v).is_solid() {
             acc.inside_solid_events += 1;
             if acc.inside_solid_first.is_none() {
@@ -555,8 +780,21 @@ fn acceptance_control(
         if acc.dist_history.len() > 240 {
             acc.dist_history.pop_front();
         }
-        let delta = rig.0.dist - acc.dist_history.iter().rev().nth(1).map(|&(_, d)| d).unwrap_or(rig.0.dist);
-        let sign = if delta > 0.05 { 1 } else if delta < -0.05 { -1 } else { 0 };
+        let delta = rig.0.dist
+            - acc
+                .dist_history
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|&(_, d)| d)
+                .unwrap_or(rig.0.dist);
+        let sign = if delta > 0.05 {
+            1
+        } else if delta < -0.05 {
+            -1
+        } else {
+            0
+        };
         if sign != 0 {
             if sign == -acc.last_dist_delta_sign && acc.last_dist_delta_sign != 0 {
                 acc.oscillation_events += 1;
@@ -580,7 +818,14 @@ fn acceptance_control(
     // ---------- 4. Finalize（阻塞完成全部判定与证据输出）----------
     if t >= T_FINALIZE && !acc.finalized {
         acc.finalized = true;
-        finalize(&mut acc, world, registry.into_inner(), diag.into_inner(), next_state, exit);
+        finalize(
+            &mut acc,
+            world,
+            registry.into_inner(),
+            diag.into_inner(),
+            next_state,
+            exit,
+        );
     }
 }
 
@@ -619,7 +864,10 @@ fn run_action(
             acc.gif_frame_count += 1;
             acc.shot_queue.push_back(ShotRequest {
                 name,
-                path: acc.dir.join("gif_frames").join(format!("{:04}.png", acc.gif_frame_count - 1)),
+                path: acc
+                    .dir
+                    .join("gif_frames")
+                    .join(format!("{:04}.png", acc.gif_frame_count - 1)),
                 downscale: true,
             });
         }
@@ -658,33 +906,83 @@ fn mark_all_dirty(world: &mut World) {
 /// A09：固定射线拾取断言。
 fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
     let mut results: Vec<(String, bool, String)> = Vec::new();
-    let check = |name: &str, cond: bool, detail: String, results: &mut Vec<(String, bool, String)>| {
-        info!("[验收/A09] {name}: {} — {detail}", if cond { "PASS" } else { "FAIL" });
-        results.push((name.to_string(), cond, detail));
-    };
+    let check =
+        |name: &str, cond: bool, detail: String, results: &mut Vec<(String, bool, String)>| {
+            info!(
+                "[验收/A09] {name}: {} — {detail}",
+                if cond { "PASS" } else { "FAIL" }
+            );
+            results.push((name.to_string(), cond, detail));
+        };
 
     // 特征点
     let feats = acc.features.as_ref().expect("特征报告必须存在");
-    let plains = feats.plains.as_ref().map(|f| f.voxel.unwrap()).unwrap_or(IVec3::new(128, 40, 128));
-    let peak = feats.mountains.as_ref().map(|f| f.voxel.unwrap()).unwrap_or(IVec3::new(128, 90, 128));
-    let opening = feats.cave_opening.as_ref().map(|f| f.voxel.unwrap()).unwrap_or(IVec3::new(64, 30, 64));
+    let plains = feats
+        .plains
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(128, 40, 128));
+    let peak = feats
+        .mountains
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(128, 90, 128));
+    let opening = feats
+        .cave_opening
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(64, 30, 64));
 
     // 1. 垂直下射平原 → 顶面命中
-    let ray = Ray::normalized(Vec3::new(plains.x as f32 + 0.5, (world.size.y - 2) as f32, plains.z as f32 + 0.5), Vec3::new(0.0, -1.0, 0.0));
+    let ray = Ray::normalized(
+        Vec3::new(
+            plains.x as f32 + 0.5,
+            (world.size.y - 2) as f32,
+            plains.z as f32 + 0.5,
+        ),
+        Vec3::new(0.0, -1.0, 0.0),
+    );
     let hit = pick_voxel(world, &ray, 400.0);
     match &hit {
         Some(h) if h.face == crate::voxel::FaceDir::PosY => {
-            check("射线1-平原垂直下射", true, format!("命中 {} 面 {:?}", h.voxel, h.face), &mut results);
+            check(
+                "射线1-平原垂直下射",
+                true,
+                format!("命中 {} 面 {:?}", h.voxel, h.face),
+                &mut results,
+            );
         }
-        other => check("射线1-平原垂直下射", false, format!("异常结果 {other:?}"), &mut results),
+        other => check(
+            "射线1-平原垂直下射",
+            false,
+            format!("异常结果 {other:?}"),
+            &mut results,
+        ),
     }
     acc.highlight_ray = Some(ray);
 
     // 2. 山顶下射 → 命中高海拔
-    let ray2 = Ray::normalized(Vec3::new(peak.x as f32 + 0.5, (world.size.y - 2) as f32, peak.z as f32 + 0.5), Vec3::new(0.0, -1.0, 0.0));
+    let ray2 = Ray::normalized(
+        Vec3::new(
+            peak.x as f32 + 0.5,
+            (world.size.y - 2) as f32,
+            peak.z as f32 + 0.5,
+        ),
+        Vec3::new(0.0, -1.0, 0.0),
+    );
     match pick_voxel(world, &ray2, 400.0) {
-        Some(h) if h.voxel.y >= 75 => check("射线2-山顶下射", true, format!("命中 y={}", h.voxel.y), &mut results),
-        other => check("射线2-山顶下射", false, format!("异常 {other:?}"), &mut results),
+        Some(h) if h.voxel.y >= 75 => check(
+            "射线2-山顶下射",
+            true,
+            format!("命中 y={}", h.voxel.y),
+            &mut results,
+        ),
+        other => check(
+            "射线2-山顶下射",
+            false,
+            format!("异常 {other:?}"),
+            &mut results,
+        ),
     }
 
     // 3. 水平跨 Chunk：从 (8,h+2) 沿 +X
@@ -692,23 +990,51 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
     let ray3 = Ray::normalized(Vec3::new(8.5, sy as f32, 8.5), Vec3::new(1.0, 0.0, 0.0));
     let hit3 = pick_voxel(world, &ray3, 300.0);
     match &hit3 {
-        Some(h) if h.voxel.x >= 8 && h.face == crate::voxel::FaceDir::NegX && h.place.x == h.voxel.x - 1 => {
-            check("射线3-水平跨Chunk", true, format!("命中 {} 面 NegX", h.voxel), &mut results);
+        Some(h)
+            if h.voxel.x >= 8
+                && h.face == crate::voxel::FaceDir::NegX
+                && h.place.x == h.voxel.x - 1 =>
+        {
+            check(
+                "射线3-水平跨Chunk",
+                true,
+                format!("命中 {} 面 NegX", h.voxel),
+                &mut results,
+            );
         }
-        other => check("射线3-水平跨Chunk", false, format!("异常 {other:?}"), &mut results),
+        other => check(
+            "射线3-水平跨Chunk",
+            false,
+            format!("异常 {other:?}"),
+            &mut results,
+        ),
     }
 
     // 4. 斜 45° 跨 Chunk
     let ray4 = Ray::normalized(Vec3::new(10.5, 90.0, 10.5), Vec3::new(1.0, -1.0, 1.0));
     match pick_voxel(world, &ray4, 400.0) {
-        Some(h) => check("射线4-斜角", true, format!("命中 {} 面 {:?}", h.voxel, h.face), &mut results),
+        Some(h) => check(
+            "射线4-斜角",
+            true,
+            format!("命中 {} 面 {:?}", h.voxel, h.face),
+            &mut results,
+        ),
         None => check("射线4-斜角", false, "未命中".into(), &mut results),
     }
 
     // 5. 天空空射线
-    match pick_voxel(world, &Ray::normalized(Vec3::new(128.5, 100.0, 128.5), Vec3::new(0.0, 1.0, 0.0)), 300.0) {
+    match pick_voxel(
+        world,
+        &Ray::normalized(Vec3::new(128.5, 100.0, 128.5), Vec3::new(0.0, 1.0, 0.0)),
+        300.0,
+    ) {
         None => check("射线5-空射线", true, "未命中（正确）".into(), &mut results),
-        Some(h) => check("射线5-空射线", false, format!("异常命中 {h:?}"), &mut results),
+        Some(h) => check(
+            "射线5-空射线",
+            false,
+            format!("异常命中 {h:?}"),
+            &mut results,
+        ),
     }
 
     // 6. 最大缩放距离等价性
@@ -718,7 +1044,16 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
         (None, None) => true,
         _ => false,
     };
-    check("射线6-最大缩放等价", same, format!("近/远: {:?} / {:?}", hit3.map(|h| h.voxel), hit6.map(|h| h.voxel)), &mut results);
+    check(
+        "射线6-最大缩放等价",
+        same,
+        format!(
+            "近/远: {:?} / {:?}",
+            hit3.map(|h| h.voxel),
+            hit6.map(|h| h.voxel)
+        ),
+        &mut results,
+    );
 
     // 7. 陡峭侧壁：找一个“起点空气、+X 三格外实体”的位置
     let mut found = None;
@@ -739,25 +1074,57 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
     }
     match found {
         Some((x, y, z)) => {
-            let ray7 = Ray::normalized(Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5), Vec3::new(1.0, 0.0, 0.0));
+            let ray7 = Ray::normalized(
+                Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+            );
             match pick_voxel(world, &ray7, 60.0) {
                 Some(h) if h.face == crate::voxel::FaceDir::NegX && h.voxel.x >= x + 2 => {
-                    check("射线7-陡峭侧壁", true, format!("命中 {} 面 NegX", h.voxel), &mut results);
+                    check(
+                        "射线7-陡峭侧壁",
+                        true,
+                        format!("命中 {} 面 NegX", h.voxel),
+                        &mut results,
+                    );
                 }
-                other => check("射线7-陡峭侧壁", false, format!("异常 {other:?}"), &mut results),
+                other => check(
+                    "射线7-陡峭侧壁",
+                    false,
+                    format!("异常 {other:?}"),
+                    &mut results,
+                ),
             }
         }
-        None => check("射线7-陡峭侧壁", false, "未找到测试位置".into(), &mut results),
+        None => check(
+            "射线7-陡峭侧壁",
+            false,
+            "未找到测试位置".into(),
+            &mut results,
+        ),
     }
 
     // 8. 洞口井射：应穿过地表开口在深处命中
     let ray8 = Ray::normalized(
-        Vec3::new(opening.x as f32 + 0.5, (opening.y + 8) as f32, opening.z as f32 + 0.5),
+        Vec3::new(
+            opening.x as f32 + 0.5,
+            (opening.y + 8) as f32,
+            opening.z as f32 + 0.5,
+        ),
         Vec3::new(0.0, -1.0, 0.0),
     );
     match pick_voxel(world, &ray8, 200.0) {
-        Some(h) if h.voxel.y < opening.y => check("射线8-洞口井射", true, format!("深 {} 命中 y={}", opening.y, h.voxel.y), &mut results),
-        other => check("射线8-洞口井射", false, format!("异常 {other:?}"), &mut results),
+        Some(h) if h.voxel.y < opening.y => check(
+            "射线8-洞口井射",
+            true,
+            format!("深 {} 命中 y={}", opening.y, h.voxel.y),
+            &mut results,
+        ),
+        other => check(
+            "射线8-洞口井射",
+            false,
+            format!("异常 {other:?}"),
+            &mut results,
+        ),
     }
 
     acc.ray_results = results;
@@ -766,7 +1133,11 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
 /// A05 运行时：Chunk 边界单体素修改 + 双侧标脏。
 fn run_edit_test(acc: &mut AcceptanceState, world: &mut World, t: f64) {
     let feats = acc.features.as_ref().unwrap();
-    let center = feats.plains.as_ref().map(|f| f.voxel.unwrap()).unwrap_or(IVec3::new(128, 40, 128));
+    let center = feats
+        .plains
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(128, 40, 128));
     // 在平原中心附近找一个 x%16==15 的边界列。
     let mut target = None;
     for dx in -60i32..60 {
@@ -809,7 +1180,8 @@ fn verify_edit(acc: &mut AcceptanceState, world: &World, t: f64) {
         Some(info) => {
             let drained = world.dirty_count() == 0;
             let solid_now = world.voxel(info.voxel) == BlockId::Stone;
-            let both_marked = info.dirty_after.contains(&info.chunk_a) && info.dirty_after.contains(&info.chunk_b);
+            let both_marked = info.dirty_after.contains(&info.chunk_a)
+                && info.dirty_after.contains(&info.chunk_b);
             let elapsed_ok = t - info.t_edit <= 8.0;
             let ok = drained && solid_now && both_marked && elapsed_ok;
             acc.edit_verify_detail = format!(
@@ -840,9 +1212,8 @@ fn process_shot_queue(
         let path = req.path.clone();
         let name = req.name.clone();
         let downscale = req.downscale;
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(move |trigger: Trigger<ScreenshotCaptured>, mut log: ResMut<ShotLog>| {
+        commands.spawn(Screenshot::primary_window()).observe(
+            move |trigger: On<ScreenshotCaptured>, mut log: ResMut<ShotLog>| {
                 let img: bevy::image::Image = std::ops::Deref::deref(trigger.event()).clone();
                 let result = save_screenshot(&img, &path, downscale);
                 match result {
@@ -855,25 +1226,36 @@ fn process_shot_queue(
                         info!("[验收] 截图保存失败 {name}: {e}");
                     }
                 }
-            });
+            },
+        );
         diag.mark_capture();
     }
 }
 
 /// 保存截图：全分辨率 PNG（固定机位）或降采样 PNG（GIF 帧）。
-fn save_screenshot(img: &bevy::image::Image, path: &Path, downscale: bool) -> std::io::Result<(u32, u32, u64)> {
+fn save_screenshot(
+    img: &bevy::image::Image,
+    path: &Path,
+    downscale: bool,
+) -> std::io::Result<(u32, u32, u64)> {
     let dynamic = img
         .clone()
         .try_into_dynamic()
         .map_err(|e| std::io::Error::other(format!("图像转换失败: {e:?}")))?;
     let rgba = dynamic.to_rgba8();
     let out = if downscale {
-        image::imageops::resize(&rgba, GIF_SIZE.0, GIF_SIZE.1, image::imageops::FilterType::Triangle)
+        image::imageops::resize(
+            &rgba,
+            GIF_SIZE.0,
+            GIF_SIZE.1,
+            image::imageops::FilterType::Triangle,
+        )
     } else {
         rgba
     };
     let (w, h) = out.dimensions();
-    out.save_with_format(path, image::ImageFormat::Png).map_err(std::io::Error::other)?;
+    out.save_with_format(path, image::ImageFormat::Png)
+        .map_err(std::io::Error::other)?;
     let bytes = std::fs::metadata(path)?.len();
     Ok((w, h, bytes))
 }
@@ -889,11 +1271,10 @@ fn finalize(
     _registry: &ChunkMeshes,
     diag: &DiagState,
     mut next_state: ResMut<NextState<GameState>>,
-    mut exit: bevy::ecs::event::EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     info!("[验收] 进入收尾判定（t={:.1}s）", acc.t());
     let t = acc.t();
-    let world = world;
     let mut checks: Vec<Check> = Vec::new();
 
     // ---- A01 干净构建（由 scripts/acceptance.sh 写入 build_checks.json）----
@@ -901,15 +1282,19 @@ fn finalize(
     let build_all = match std::fs::read_to_string(&build_json) {
         Ok(content) => {
             let fmt_ok = content.contains("\"fmt\": true") || content.contains("\"fmt\":true");
-            let clippy_ok = content.contains("\"clippy\": true") || content.contains("\"clippy\":true");
+            let clippy_ok =
+                content.contains("\"clippy\": true") || content.contains("\"clippy\":true");
             let test_ok = content.contains("\"tests\": true") || content.contains("\"tests\":true");
-            let build_ok = content.contains("\"release_build\": true") || content.contains("\"release_build\":true");
+            let build_ok = content.contains("\"release_build\": true")
+                || content.contains("\"release_build\":true");
             let all = fmt_ok && clippy_ok && test_ok && build_ok;
             checks.push(Check {
                 id: "A01",
                 name: "干净构建（fmt/clippy/test/Release）",
                 pass: all,
-                detail: format!("fmt={fmt_ok} clippy={clippy_ok} tests={test_ok} release={build_ok}"),
+                detail: format!(
+                    "fmt={fmt_ok} clippy={clippy_ok} tests={test_ok} release={build_ok}"
+                ),
                 evidence: "build_checks.json".into(),
             });
             all
@@ -919,7 +1304,8 @@ fn finalize(
                 id: "A01",
                 name: "干净构建（fmt/clippy/test/Release）",
                 pass: false,
-                detail: "build_checks.json 缺失：必须通过 scripts/acceptance.sh 运行完整验收".into(),
+                detail: "build_checks.json 缺失：必须通过 scripts/acceptance.sh 运行完整验收"
+                    .into(),
                 evidence: "（缺失）".into(),
             });
             false
@@ -1043,7 +1429,10 @@ fn finalize(
         id: "A05",
         name: "Mesh 正确性与边界重建",
         pass: a05,
-        detail: format!("运行时: {}；遮挡/绕序/跨界无内面/空 Chunk 等由单元测试 meshing::tests 覆盖", acc.edit_verify_detail),
+        detail: format!(
+            "运行时: {}；遮挡/绕序/跨界无内面/空 Chunk 等由单元测试 meshing::tests 覆盖",
+            acc.edit_verify_detail
+        ),
         evidence: "cargo test meshing / screenshots/A05_edit_rebuild.png".into(),
     });
 
@@ -1090,7 +1479,10 @@ fn finalize(
         id: "A07",
         name: "渲染准备（visible-unready=0，队列清空）",
         pass: a07,
-        detail: format!("巡航期间 visible-unready 违规帧={}，收尾队列残留={}", acc.unready_violation_frames, dirty_now),
+        detail: format!(
+            "巡航期间 visible-unready 违规帧={}，收尾队列残留={}",
+            acc.unready_violation_frames, dirty_now
+        ),
         evidence: "metrics.csv".into(),
     });
 
@@ -1114,14 +1506,31 @@ fn finalize(
         id: "A09",
         name: "拾取（8 条固定射线）",
         pass: a09,
-        detail: format!("{ray_pass}/{} 条通过: {}", acc.ray_results.len(), acc.ray_results.iter().map(|r| r.0.clone()).collect::<Vec<_>>().join("；")),
+        detail: format!(
+            "{ray_pass}/{} 条通过: {}",
+            acc.ray_results.len(),
+            acc.ray_results
+                .iter()
+                .map(|r| r.0.clone())
+                .collect::<Vec<_>>()
+                .join("；")
+        ),
         evidence: "screenshots/A09_picking_highlight.png".into(),
     });
 
     // ---- A10 20 TPS 分离 ----
     let tick_at = |t0: f64, t1: f64| -> Option<(f64, f64)> {
-        let a = acc.tick_samples.iter().find(|(ts, _)| *ts >= t0).map(|(_, c)| *c);
-        let b = acc.tick_samples.iter().rev().find(|(ts, _)| *ts <= t1).map(|(_, c)| *c);
+        let a = acc
+            .tick_samples
+            .iter()
+            .find(|(ts, _)| *ts >= t0)
+            .map(|(_, c)| *c);
+        let b = acc
+            .tick_samples
+            .iter()
+            .rev()
+            .find(|(ts, _)| *ts <= t1)
+            .map(|(_, c)| *c);
         match (a, b) {
             (Some(a), Some(b)) => Some((t1 - t0, b.saturating_sub(a) as f64)),
             _ => None,
@@ -1160,13 +1569,21 @@ fn finalize(
         id: "A11",
         name: "稳定性（≥10 分钟巡航）",
         pass: a11,
-        detail: format!("运行 {t:.0}s，panic={}，队列残留={}", panic_happened, dirty_now),
+        detail: format!(
+            "运行 {t:.0}s，panic={}，队列残留={}",
+            panic_happened, dirty_now
+        ),
         evidence: "metrics.csv / app_stdout.log".into(),
     });
 
     // ---- A12 资源稳定 ----
     let win_mean = |lo: f64, hi: f64| -> Option<f64> {
-        let s: Vec<f64> = acc.rss_samples.iter().filter(|(ts, _)| *ts >= lo && *ts <= hi).map(|(_, r)| *r).collect();
+        let s: Vec<f64> = acc
+            .rss_samples
+            .iter()
+            .filter(|(ts, _)| *ts >= lo && *ts <= hi)
+            .map(|(_, r)| *r)
+            .collect();
         if s.is_empty() {
             None
         } else {
@@ -1174,8 +1591,17 @@ fn finalize(
         }
     };
     let first = win_mean(180.0, 300.0);
-    let last_max = acc.rss_samples.iter().filter(|(ts, _)| *ts >= 508.0).map(|(_, r)| *r).fold(0.0f64, f64::max);
-    let ent_first = acc.entity_samples.iter().find(|(ts, _)| *ts >= 200.0).map(|(_, e)| *e);
+    let last_max = acc
+        .rss_samples
+        .iter()
+        .filter(|(ts, _)| *ts >= 508.0)
+        .map(|(_, r)| *r)
+        .fold(0.0f64, f64::max);
+    let ent_first = acc
+        .entity_samples
+        .iter()
+        .find(|(ts, _)| *ts >= 200.0)
+        .map(|(_, e)| *e);
     let ent_last = acc.entity_samples.last().map(|(_, e)| *e);
     let (a12, a12_detail) = match (first, ent_first, ent_last) {
         (Some(first), Some(ef), Some(el)) => {
@@ -1224,7 +1650,10 @@ fn finalize(
             ),
         )
     } else {
-        (false, format!("帧样本不足（{}），运行时长异常", times.len()))
+        (
+            false,
+            format!("帧样本不足（{}），运行时长异常", times.len()),
+        )
     };
     checks.push(Check {
         id: "A13",
@@ -1279,18 +1708,38 @@ fn finalize(
 
     let mut md = String::new();
     md.push_str("# 初版验收报告（自动判定）\n\n");
-    md.push_str(&format!("- **总体结论：{overall}**（A01-A13 运行时判定；A14 由独立 Reviewer 复核出具）\n"));
-    md.push_str(&format!("- Seed：{}，世界 {}×{}×{}，窗口 {}×{}，运行 {:.0}s\n", acc.cfg.seed, acc.cfg.size.x, acc.cfg.size.y, acc.cfg.size.z, acc.cfg.window[0], acc.cfg.window[1], t));
+    md.push_str(&format!(
+        "- **总体结论：{overall}**（A01-A13 运行时判定；A14 由独立 Reviewer 复核出具）\n"
+    ));
+    md.push_str(&format!(
+        "- Seed：{}，世界 {}×{}×{}，窗口 {}×{}，运行 {:.0}s\n",
+        acc.cfg.seed,
+        acc.cfg.size.x,
+        acc.cfg.size.y,
+        acc.cfg.size.z,
+        acc.cfg.window[0],
+        acc.cfg.window[1],
+        t
+    ));
     md.push_str(&format!("- 世界哈希：`{:#x}`\n\n", acc.initial_world_hash));
     md.push_str("| ID | 项目 | 结论 | 说明 |\n|---|---|---|---|\n");
     for c in &checks {
-        md.push_str(&format!("| {} | {} | {} | {} |\n", c.id, c.name, if c.pass { "PASS" } else { "FAIL" }, c.detail));
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            c.id,
+            c.name,
+            if c.pass { "PASS" } else { "FAIL" },
+            c.detail
+        ));
     }
     md.push_str("\n## 特征探测\n\n");
     md.push_str(&features.summary());
-    md.push_str("\n");
+    md.push('\n');
     let _ = std::fs::write(acc.dir.join("report.md"), &md);
-    info!("[验收] 报告已写入 {}（overall={overall}）", acc.dir.display());
+    info!(
+        "[验收] 报告已写入 {}（overall={overall}）",
+        acc.dir.display()
+    );
 
     acc.checks = checks;
     let _ = build_all;

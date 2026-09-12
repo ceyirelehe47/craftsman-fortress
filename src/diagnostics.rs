@@ -58,7 +58,9 @@ impl DiagState {
     }
 
     fn excluded(&self) -> bool {
-        self.exclude_until.map(|t| Instant::now() < t).unwrap_or(false)
+        self.exclude_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false)
     }
 }
 
@@ -82,7 +84,11 @@ fn diagnostics_update(
     let dt = time.delta_secs();
     if dt > 0.0 {
         let fps = 1.0 / dt;
-        diag.fps_ema = if diag.fps_ema == 0.0 { fps } else { diag.fps_ema * 0.9 + fps * 0.1 };
+        diag.fps_ema = if diag.fps_ema == 0.0 {
+            fps
+        } else {
+            diag.fps_ema * 0.9 + fps * 0.1
+        };
     }
     if diag.collecting && !diag.excluded() && dt > 0.0 {
         diag.frame_times.push_back(dt);
@@ -93,7 +99,11 @@ fn diagnostics_update(
 
     let now = Instant::now();
     // RSS 采样（5s 周期）。
-    if diag.last_rss.map(|t| now.duration_since(t).as_secs_f64() >= 5.0).unwrap_or(true) {
+    if diag
+        .last_rss
+        .map(|t| now.duration_since(t).as_secs_f64() >= 5.0)
+        .unwrap_or(true)
+    {
         diag.last_rss = Some(now);
         sample_rss(&mut diag);
     }
@@ -103,18 +113,31 @@ fn diagnostics_update(
     };
 
     // 可见未准备 Chunk：观察中心半径 RENDER_RADIUS 内未 Mesh 的 Chunk 数（应恒为 0）。
-    if diag.last_csv.map(|t| now.duration_since(t).as_secs_f32() >= 1.0).unwrap_or(true) {
+    if diag
+        .last_csv
+        .map(|t| now.duration_since(t).as_secs_f32() >= 1.0)
+        .unwrap_or(true)
+    {
         diag.visible_unready = count_visible_unready(world, &registry, rig.0.focus, RENDER_RADIUS);
     }
 
     // HUD 4Hz。
-    if diag.last_hud.map(|t| now.duration_since(t).as_secs_f32() >= 0.25).unwrap_or(true) {
+    if diag
+        .last_hud
+        .map(|t| now.duration_since(t).as_secs_f32() >= 0.25)
+        .unwrap_or(true)
+    {
         diag.last_hud = Some(now);
         let rig = &rig.0;
         let pick_s = pick
             .0
             .as_ref()
-            .map(|h| format!("({},{},{}) 面 {:?}", h.voxel.x, h.voxel.y, h.voxel.z, h.face))
+            .map(|h| {
+                format!(
+                    "({},{},{}) 面 {:?}",
+                    h.voxel.x, h.voxel.y, h.voxel.z, h.face
+                )
+            })
             .unwrap_or_else(|| "无".into());
         let text = format!(
             "Seed {} · 世界 {}×{}×{} · Chunk 16³ · TPS {:.1} (#{})\n\
@@ -152,7 +175,11 @@ fn diagnostics_update(
     }
 
     // CSV 1Hz。
-    if diag.last_csv.map(|t| now.duration_since(t).as_secs_f32() >= 1.0).unwrap_or(true) {
+    if diag
+        .last_csv
+        .map(|t| now.duration_since(t).as_secs_f32() >= 1.0)
+        .unwrap_or(true)
+    {
         diag.last_csv = Some(now);
         let mut csv_line = None;
         if diag.csv.is_some() {
@@ -206,7 +233,10 @@ fn count_visible_unready(
                 if dx * dx + dz * dz > r_chunks * r_chunks {
                     continue;
                 }
-                if !registry.entries.contains_key(&bevy::math::IVec3::new(cx, cy, cz)) {
+                if !registry
+                    .entries
+                    .contains_key(&bevy::math::IVec3::new(cx, cy, cz))
+                {
                     unready += 1;
                 }
             }
@@ -221,7 +251,11 @@ fn sample_rss(diag: &mut DiagState) {
         diag.sys = Some(System::new());
     }
     let Some(sys) = diag.sys.as_mut() else { return };
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
     if let Some(proc) = sys.process(Pid::from_u32(std::process::id())) {
         diag.rss_mb = proc.memory() as f64 / (1024.0 * 1024.0);
     }

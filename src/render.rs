@@ -63,7 +63,10 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<DebugTintRes>();
     app.init_resource::<LoadingCursor>();
     app.init_resource::<StandardMaterialHandle>();
-    app.add_systems(OnEnter(GameState::Loading), (setup_scene, create_material).chain());
+    app.add_systems(
+        OnEnter(GameState::Loading),
+        (setup_scene, create_material).chain(),
+    );
     app.add_systems(
         Update,
         loading_progress_system.run_if(in_state(GameState::Loading)),
@@ -110,7 +113,7 @@ fn setup_scene(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             illuminance: 14000.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..Default::default()
         },
         Transform::from_xyz(120.0, 180.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -138,7 +141,10 @@ fn create_material(
 
 /// 从纯数据装配 Bevy Mesh。
 pub fn mesh_from_data(data: &ChunkMeshData) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
@@ -166,7 +172,8 @@ pub fn apply_chunk_mesh(
     match registry.entries.get(&cc) {
         Some((_, handle)) => {
             // 句柄复用：原地替换资源内容，实体与句柄保持稳定。
-            meshes.insert(handle.id(), mesh);
+            // 0.19 起 Assets::insert 返回 Result（句柄已存在时必然成功）。
+            let _ = meshes.insert(handle.id(), mesh);
         }
         None => {
             let handle = meshes.add(mesh);
@@ -192,6 +199,7 @@ fn linear_to_chunk(i: usize, n: bevy::math::UVec3) -> IVec3 {
 }
 
 /// 加载推进：每帧限时分片生成 Chunk 与构建 Mesh，完成后切入 Ready。
+#[allow(clippy::too_many_arguments)]
 fn loading_progress_system(
     mut commands: Commands,
     mut world_res: ResMut<WorldRes>,
@@ -233,7 +241,14 @@ fn loading_progress_system(
                 }
                 let cc = linear_to_chunk(cursor.mesh_next, n);
                 let data = build_chunk_mesh(world, cc, tint.0);
-                apply_chunk_mesh(&mut commands, &mut meshes, material, &mut registry, cc, &data);
+                apply_chunk_mesh(
+                    &mut commands,
+                    &mut meshes,
+                    material,
+                    &mut registry,
+                    cc,
+                    &data,
+                );
                 cursor.mesh_next += 1;
             }
         }
@@ -277,15 +292,17 @@ fn rebuild_dirty_system(
         return;
     };
     let dirty = world.dirty_chunks();
-    let mut rebuilt = 0;
-    for cc in dirty {
-        if rebuilt >= 64 {
-            break; // 每帧预算（常态下脏集合极小）
-        }
+    for cc in dirty.into_iter().take(64) {
         let data = build_chunk_mesh(world, cc, tint.0);
-        apply_chunk_mesh(&mut commands, &mut meshes, material, &mut registry, cc, &data);
+        apply_chunk_mesh(
+            &mut commands,
+            &mut meshes,
+            material,
+            &mut registry,
+            cc,
+            &data,
+        );
         world.clear_dirty(cc);
-        rebuilt += 1;
     }
 }
 

@@ -98,7 +98,9 @@ impl World {
         }
         let n = self.size.chunks();
         Some(
-            (cc.x as usize) + (cc.z as usize) * (n.x as usize) + (cc.y as usize) * (n.x as usize) * (n.z as usize),
+            (cc.x as usize)
+                + (cc.z as usize) * (n.x as usize)
+                + (cc.y as usize) * (n.x as usize) * (n.z as usize),
         )
     }
 
@@ -146,7 +148,7 @@ impl World {
         }
         let cc = chunk_of_voxel(v);
         let local = local_of_voxel(v);
-        {
+        let old = {
             let idx = self.slot_index(cc).unwrap();
             let slot = &mut self.chunks[idx];
             if !slot.generated {
@@ -157,7 +159,8 @@ impl World {
                 return Some(old);
             }
             slot.data.set(local, block);
-        }
+            old
+        };
         // 标记本 Chunk 与（当体素位于 Chunk 边界时）相邻 Chunk。
         self.dirty.insert(cc, ());
         if local.x == 0 {
@@ -180,7 +183,7 @@ impl World {
         }
         // 只保留有效范围内的 Chunk（越界邻居忽略）。
         self.dirty.retain(|k, _| self.size.contains_chunk(*k));
-        Some(self.voxel(v))
+        Some(old)
     }
 
     /// 待重建 Chunk 队列快照。
@@ -208,7 +211,12 @@ impl World {
 
     /// 全量世界哈希（确定性验收 A02 证据）：按固定顺序混合 palette + 索引字节。
     pub fn world_hash(&self) -> u64 {
-        let mut h = mix64(self.params.seed ^ (self.size.x as u64) << 32 ^ self.size.y as u64 ^ (self.size.z as u64) << 48);
+        let mut h = mix64(
+            self.params.seed
+                ^ (self.size.x as u64) << 32
+                ^ self.size.y as u64
+                ^ (self.size.z as u64) << 48,
+        );
         for cy in 0..(self.size.chunks().y as i32) {
             for cz in 0..(self.size.chunks().z as i32) {
                 for cx in 0..(self.size.chunks().x as i32) {
@@ -239,6 +247,22 @@ impl World {
     /// 体素中心世界坐标（米）。
     pub fn voxel_center(v: IVec3) -> bevy::math::Vec3 {
         bevy::math::Vec3::new(v.x as f32 + 0.5, v.y as f32 + 0.5, v.z as f32 + 0.5)
+    }
+
+    /// 测试辅助：把全部 chunk 置为已生成的空气（构造几何断言所需的受控空世界；
+    /// `ensure_chunk` 生成的是真实地形，不适合精确面数/拾取断言）。
+    pub fn fill_air_all_for_test(&mut self) {
+        for slot in &mut self.chunks {
+            slot.data = ChunkData::filled_air();
+            slot.generated = true;
+        }
+        self.generated_count = self.chunks.len();
+        self.dirty.clear();
+    }
+
+    /// 测试辅助：清空脏集合。
+    pub fn clear_all_dirty_for_test(&mut self) {
+        self.dirty.clear();
     }
 }
 
@@ -279,11 +303,16 @@ mod tests {
         let mut w = World::generate_all(size, small_params());
         w.clear_all_dirty_for_test();
         // 修改 (16, 8, 16)：位于 chunk (1,0,1) 的局部 (0,8,0)，x/z 均贴边界
-        let old = w.set_voxel(IVec3::new(16, 8, 16), BlockId::Bedrock).unwrap();
+        let old = w
+            .set_voxel(IVec3::new(16, 8, 16), BlockId::Bedrock)
+            .unwrap();
         assert_eq!(w.voxel(IVec3::new(16, 8, 16)), BlockId::Bedrock);
         assert_ne!(old, BlockId::Bedrock);
         let dirty = w.dirty_chunks();
-        assert!(dirty.contains(&IVec3::new(1, 0, 1)), "本 chunk 应脏: {dirty:?}");
+        assert!(
+            dirty.contains(&IVec3::new(1, 0, 1)),
+            "本 chunk 应脏: {dirty:?}"
+        );
         assert!(dirty.contains(&IVec3::new(0, 0, 1)), "-x 邻居应脏");
         assert!(dirty.contains(&IVec3::new(1, 0, 0)), "-z 邻居应脏");
         assert!(!dirty.contains(&IVec3::new(0, 0, 0)));
@@ -297,10 +326,22 @@ mod tests {
         let mut w = World::empty(size, small_params());
         w.ensure_chunk(IVec3::new(0, 0, 0));
         assert_eq!(w.voxel(IVec3::new(-1, 5, 0)), BlockId::Air, "水平越界=空气");
-        assert_eq!(w.voxel(IVec3::new(0, -1, 0)), BlockId::Bedrock, "底部越界=实体");
-        assert_eq!(w.voxel(IVec3::new(0, 100, 0)), BlockId::Air, "顶部越界=空气");
+        assert_eq!(
+            w.voxel(IVec3::new(0, -1, 0)),
+            BlockId::Bedrock,
+            "底部越界=实体"
+        );
+        assert_eq!(
+            w.voxel(IVec3::new(0, 100, 0)),
+            BlockId::Air,
+            "顶部越界=空气"
+        );
         assert_eq!(w.set_voxel(IVec3::new(-1, 0, 0), BlockId::Stone), None);
-        assert_eq!(w.set_voxel(IVec3::new(0, 0, 0), BlockId::Stone), None, "未生成 chunk 不可写");
+        assert_eq!(
+            w.set_voxel(IVec3::new(0, 0, 16), BlockId::Stone),
+            None,
+            "未生成 chunk 不可写"
+        );
     }
 
     #[test]
@@ -334,8 +375,8 @@ mod tests {
             i -= 1;
             order.swap(i, j);
         }
-        for cc in order {
-            b.ensure_chunk(cc);
+        for cc in &order {
+            b.ensure_chunk(*cc);
         }
         assert_eq!(a.world_hash(), b.world_hash(), "生成顺序不得影响世界哈希");
 
@@ -355,12 +396,5 @@ mod tests {
             }
         }
         assert_ne!(a.world_hash(), d.world_hash());
-    }
-}
-
-impl World {
-    /// 测试辅助：清空脏集合。
-    pub fn clear_all_dirty_for_test(&mut self) {
-        self.dirty.clear();
     }
 }

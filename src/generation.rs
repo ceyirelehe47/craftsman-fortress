@@ -64,10 +64,10 @@ impl TerrainParams {
             hills_freq: 0.021,
             hills_amp: 6.5,
             mountain_mask_freq: 0.0042,
-            mountain_mask_lo: 0.55,
+            mountain_mask_lo: 0.44,
             mountain_mask_hi: 0.78,
             mountain_freq: 0.013,
-            mountain_amp: 58.0,
+            mountain_amp: 78.0,
             terrace_step: 7.0,
             terrace_plateau: 0.5,
             valley_freq: 0.009,
@@ -76,7 +76,7 @@ impl TerrainParams {
             sand_level: 24,
             cave_freq: 0.045,
             cave_y_freq: 0.062,
-            cave_threshold: 0.055,
+            cave_threshold: 0.080,
             cavern_freq: 0.021,
             cavern_y_freq: 0.032,
             cavern_threshold: 0.66,
@@ -94,18 +94,39 @@ impl TerrainParams {
         let s = self.seed;
 
         // 大陆起伏（低频大波长）。
-        let continent = fbm2(mix64(s ^ 0xC0FF_EE01), xf * self.continent_freq, zf * self.continent_freq, 4);
+        let continent = fbm2(
+            mix64(s ^ 0xC0FF_EE01),
+            xf * self.continent_freq,
+            zf * self.continent_freq,
+            4,
+        );
         let mut h = self.base_height + continent * self.continent_amp;
 
         // 丘陵。
-        let hills = fbm2(mix64(s ^ 0x0F0F_0F0F), xf * self.hills_freq, zf * self.hills_freq, 3);
+        let hills = fbm2(
+            mix64(s ^ 0x0F0F_0F0F),
+            xf * self.hills_freq,
+            zf * self.hills_freq,
+            3,
+        );
         h += hills * self.hills_amp;
 
         // 山区：低频掩码 × 脊线噪声，再台地化形成悬崖式陡壁。
-        let mask_raw = fbm2(mix64(s ^ 0xAAAA_0001), xf * self.mountain_mask_freq, zf * self.mountain_mask_freq, 3) * 0.5 + 0.5;
+        let mask_raw = fbm2(
+            mix64(s ^ 0xAAAA_0001),
+            xf * self.mountain_mask_freq,
+            zf * self.mountain_mask_freq,
+            3,
+        ) * 0.5
+            + 0.5;
         let mask = smoothstep(self.mountain_mask_lo, self.mountain_mask_hi, mask_raw);
         if mask > 0.0 {
-            let ridge = ridged2(mix64(s ^ 0x1234_ABCD), xf * self.mountain_freq, zf * self.mountain_freq, 4);
+            let ridge = ridged2(
+                mix64(s ^ 0x1234_ABCD),
+                xf * self.mountain_freq,
+                zf * self.mountain_freq,
+                4,
+            );
             let mtn = ridge * self.mountain_amp * mask;
             // 台地化：量化到 terrace_step，并压缩台阶内坡度形成平顶 + 陡壁。
             let q = mtn / self.terrace_step;
@@ -116,7 +137,13 @@ impl TerrainParams {
         }
 
         // 河谷：低频掩码负向下切（山区豁免，避免削峰）。
-        let valley_raw = fbm2(mix64(s ^ 0x5C5C_5C5C), xf * self.valley_freq, zf * self.valley_freq, 3) * 0.5 + 0.5;
+        let valley_raw = fbm2(
+            mix64(s ^ 0x5C5C_5C5C),
+            xf * self.valley_freq,
+            zf * self.valley_freq,
+            3,
+        ) * 0.5
+            + 0.5;
         if valley_raw > self.valley_threshold {
             let t = (valley_raw - self.valley_threshold) / (1.0 - self.valley_threshold);
             h -= t * t * self.valley_depth * (1.0 - mask);
@@ -136,9 +163,19 @@ impl TerrainParams {
         let zf = z as f32;
 
         // 意大利面通道：两条通道噪声的窄带交集 => 管状隧道，可穿透地表形成洞口。
-        let n1 = value_noise3(mix64(s ^ 0xCAFE_0001), xf * self.cave_freq, yf * self.cave_y_freq, zf * self.cave_freq) - 0.5;
+        let n1 = value_noise3(
+            mix64(s ^ 0xCAFE_0001),
+            xf * self.cave_freq,
+            yf * self.cave_y_freq,
+            zf * self.cave_freq,
+        ) - 0.5;
         if n1.abs() < self.cave_threshold {
-            let n2 = value_noise3(mix64(s ^ 0xBEEF_0002), xf * self.cave_freq, yf * self.cave_y_freq, zf * self.cave_freq) - 0.5;
+            let n2 = value_noise3(
+                mix64(s ^ 0xBEEF_0002),
+                xf * self.cave_freq,
+                yf * self.cave_y_freq,
+                zf * self.cave_freq,
+            ) - 0.5;
             if n2.abs() < self.cave_threshold {
                 return true;
             }
@@ -146,7 +183,13 @@ impl TerrainParams {
 
         // 深部大洞室。
         if y < self.cavern_max_y {
-            let cavern = fbm3(mix64(s ^ 0xD00D_0003), xf * self.cavern_freq, yf * self.cavern_y_freq, zf * self.cavern_freq, 3);
+            let cavern = fbm3(
+                mix64(s ^ 0xD00D_0003),
+                xf * self.cavern_freq,
+                yf * self.cavern_y_freq,
+                zf * self.cavern_freq,
+                3,
+            );
             if cavern > self.cavern_threshold {
                 return true;
             }
@@ -214,7 +257,10 @@ pub fn generate_chunk(params: &TerrainParams, cc: IVec3, world_y: u32) -> ChunkD
                     }
                 };
                 if block != BlockId::Air {
-                    chunk.set_index(local_index(UVec3::new(lx as u32, ly as u32, lz as u32)), block);
+                    chunk.set_index(
+                        local_index(UVec3::new(lx as u32, ly as u32, lz as u32)),
+                        block,
+                    );
                 }
             }
         }
@@ -276,21 +322,39 @@ mod tests {
                 let h = p.terrain_height(x, z);
                 hmin = hmin.min(h);
                 hmax = hmax.max(h);
-                assert!(h >= 1 && h <= 126, "h={h}");
+                assert!((1..=126).contains(&h), "h={h}");
             }
         }
         assert!(hmax - hmin >= 40, "高低差不足: {hmin}..{hmax}");
     }
 
-    /// 底部 Chunk 必有基岩；顶层 Chunk 基本为空气。
+    /// 底部 Chunk 必有基岩（y<=bedrock_layers）；顶层 Chunk 全空气。
     #[test]
     fn bottom_bedrock_top_air() {
         let p = TerrainParams::new(20260912);
         let bottom = generate_chunk(&p, IVec3::new(0, 0, 0), 128);
-        assert_eq!(bottom.get(local_of_voxel(IVec3::new(5, 0, 5))), BlockId::Bedrock);
-        assert_eq!(bottom.get(local_of_voxel(IVec3::new(5, 3, 5))), BlockId::Stone);
+        assert_eq!(
+            bottom.get(local_of_voxel(IVec3::new(5, 0, 5))),
+            BlockId::Bedrock,
+            "y=0 基岩"
+        );
+        assert_eq!(
+            bottom.get(local_of_voxel(IVec3::new(5, 3, 5))),
+            BlockId::Bedrock,
+            "y=3 仍在基岩保护层（bedrock_layers=3 => y∈[0,3]）"
+        );
+        // y=4 越过基岩层：应为岩石或被洞穴挖空的空气（两者皆合法），绝不能仍是基岩。
+        assert_ne!(
+            bottom.get(local_of_voxel(IVec3::new(5, 4, 5))),
+            BlockId::Bedrock,
+            "y=4 越过基岩层"
+        );
         let top = generate_chunk(&p, IVec3::new(0, 7, 0), 128);
-        let solid = top.indices().iter().filter(|&&i| top.palette()[i as usize] != BlockId::Air).count();
+        let solid = top
+            .indices()
+            .iter()
+            .filter(|&&i| top.palette()[i as usize] != BlockId::Air)
+            .count();
         assert_eq!(solid, 0, "顶层 Chunk 应为空气");
     }
 }

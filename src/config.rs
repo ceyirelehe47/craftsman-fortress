@@ -7,7 +7,9 @@
 use crate::coords::WorldSize;
 
 /// 默认验收 Seed（特征探测回归测试 `acceptance_seed_has_all_features` 保证其地形齐备）。
-pub const DEFAULT_SEED: u64 = 20260912;
+/// 2026-09-13 参数修订（山体掩码/洞口探测）后经 feature_scan 全量扫描选定：
+/// 该 seed 八类特征齐备且余量最大（峰 115m、高差 112m、洞口贯穿 -7m）。
+pub const DEFAULT_SEED: u64 = 12345;
 /// 默认世界尺寸（体素）：256 × 128 × 256（任务书下限）。
 pub const DEFAULT_SIZE: WorldSize = WorldSize::new(256, 128, 256);
 /// 验收窗口分辨率（固定，性能门槛 A13 的声明条件）。
@@ -58,15 +60,25 @@ impl AppConfig {
                     cfg.seed = v.parse().map_err(|_| format!("无效 seed: {v}"))?;
                 }
                 "--size" => {
-                    let x: u32 = next_at(&args, &mut i, "--size")?.parse().map_err(|_| "无效尺寸 X".to_string())?;
-                    let y: u32 = next_at(&args, &mut i, "--size")?.parse().map_err(|_| "无效尺寸 Y".to_string())?;
-                    let z: u32 = next_at(&args, &mut i, "--size")?.parse().map_err(|_| "无效尺寸 Z".to_string())?;
+                    let x: u32 = next_at(&args, &mut i, "--size")?
+                        .parse()
+                        .map_err(|_| "无效尺寸 X".to_string())?;
+                    let y: u32 = next_at(&args, &mut i, "--size")?
+                        .parse()
+                        .map_err(|_| "无效尺寸 Y".to_string())?;
+                    let z: u32 = next_at(&args, &mut i, "--size")?
+                        .parse()
+                        .map_err(|_| "无效尺寸 Z".to_string())?;
                     validate_size(x, y, z)?;
                     cfg.size = WorldSize::new(x, y, z);
                 }
                 "--window" => {
-                    let w: f32 = next_at(&args, &mut i, "--window")?.parse().map_err(|_| "无效窗口宽度".to_string())?;
-                    let h: f32 = next_at(&args, &mut i, "--window")?.parse().map_err(|_| "无效窗口高度".to_string())?;
+                    let w: f32 = next_at(&args, &mut i, "--window")?
+                        .parse()
+                        .map_err(|_| "无效窗口宽度".to_string())?;
+                    let h: f32 = next_at(&args, &mut i, "--window")?
+                        .parse()
+                        .map_err(|_| "无效窗口高度".to_string())?;
                     if w < 320.0 || h < 240.0 {
                         return Err("窗口尺寸过小".into());
                     }
@@ -98,7 +110,7 @@ fn validate_size(x: u32, y: u32, z: u32) -> Result<(), String> {
     if x == 0 || y == 0 || z == 0 {
         return Err("尺寸必须为正".into());
     }
-    if x % CHUNK != 0 || y % CHUNK != 0 || z % CHUNK != 0 {
+    if !x.is_multiple_of(CHUNK) || !y.is_multiple_of(CHUNK) || !z.is_multiple_of(CHUNK) {
         return Err("尺寸必须是 16 的整数倍（Chunk 尺寸）".into());
     }
     // 验收规模下限在任务书约束内（256×128×256）；更大尺寸允许但给出提示。
@@ -143,7 +155,8 @@ mod tests {
 
     #[test]
     fn parse_acceptance() {
-        let cfg = AppConfig::parse(args(&["--acceptance", "--seed", "42", "--evidence", "out"])).unwrap();
+        let cfg =
+            AppConfig::parse(args(&["--acceptance", "--seed", "42", "--evidence", "out"])).unwrap();
         assert!(cfg.acceptance);
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.evidence_dir, "out");
@@ -152,8 +165,14 @@ mod tests {
     #[test]
     fn parse_rejects_bad() {
         assert!(AppConfig::parse(args(&["--seed", "abc"])).is_err());
-        assert!(AppConfig::parse(args(&["--size", "100", "128", "256"])).is_err(), "尺寸非 16 倍数");
-        assert!(AppConfig::parse(args(&["--size", "256", "64", "256"])).is_err(), "低于下限");
+        assert!(
+            AppConfig::parse(args(&["--size", "100", "128", "256"])).is_err(),
+            "尺寸非 16 倍数"
+        );
+        assert!(
+            AppConfig::parse(args(&["--size", "256", "64", "256"])).is_err(),
+            "低于下限"
+        );
         assert!(AppConfig::parse(args(&["--nope"])).is_err());
         assert!(AppConfig::parse(args(&["--seed"])).is_err(), "缺值");
     }

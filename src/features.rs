@@ -46,7 +46,11 @@ impl FeatureReport {
     }
 
     pub fn summary(&self) -> String {
-        let f = |o: &Option<FeatureHit>| o.as_ref().map(|h| h.detail.clone()).unwrap_or_else(|| "缺失".into());
+        let f = |o: &Option<FeatureHit>| {
+            o.as_ref()
+                .map(|h| h.detail.clone())
+                .unwrap_or_else(|| "缺失".into())
+        };
         format!(
             "平原: {} | 丘陵: {} | 山地: {} | 山谷: {} | 悬崖: {} | 洞口: {} | 地下洞穴: {} | 高差: {}m ({}..{})",
             f(&self.plains),
@@ -84,7 +88,8 @@ pub fn probe_world(world: &World) -> FeatureReport {
     }
 
     let at = |x: i32, z: i32| height[(z * sx + x) as usize];
-    let center_of = |x: i32, z: i32| Vec3::new(x as f32 + 0.5, at(x, z) as f32 + 0.5, z as f32 + 0.5);
+    let center_of =
+        |x: i32, z: i32| Vec3::new(x as f32 + 0.5, at(x, z) as f32 + 0.5, z as f32 + 0.5);
 
     // ---- 平原：12×12 窗口内高差 ≤ 2 ----
     let mut plains = None;
@@ -137,7 +142,11 @@ pub fn probe_world(world: &World) -> FeatureReport {
                     name: "丘陵",
                     view_center: center_of(x + 12, z + 12),
                     voxel: Some(IVec3::new(x + 12, hi, z + 12)),
-                    detail: format!("24×24 高差 {range}m 平均坡降 {mean_slope:.2} @ ({},{})", x + 12, z + 12),
+                    detail: format!(
+                        "24×24 高差 {range}m 平均坡降 {mean_slope:.2} @ ({},{})",
+                        x + 12,
+                        z + 12
+                    ),
                 });
                 break 'hills;
             }
@@ -163,7 +172,10 @@ pub fn probe_world(world: &World) -> FeatureReport {
             name: "山地",
             view_center: Vec3::new(peak.0 as f32, peak_h as f32, peak.1 as f32),
             voxel: Some(IVec3::new(peak.0, peak_h, peak.1)),
-            detail: format!("最高峰 {peak_h}m（均值 {mean_h}m）@ ({},{})", peak.0, peak.1),
+            detail: format!(
+                "最高峰 {peak_h}m（均值 {mean_h}m）@ ({},{})",
+                peak.0, peak.1
+            ),
         })
     } else {
         None
@@ -217,7 +229,8 @@ pub fn probe_world(world: &World) -> FeatureReport {
         }
     }
 
-    // ---- 洞口：地表开口（表面顶层连续向下 ≥4 空气，且连通体积 ≥ 60）----
+    // ---- 洞口：地表开口（本列最高实体显著低于邻域表面，说明顶部被洞穴挖穿，
+    //      且开口向下连通足够大的空气腔）----
     let mut cave_opening = None;
     'opening: for z in (2..sz - 2).step_by(2) {
         for x in (2..sx - 2).step_by(2) {
@@ -225,28 +238,29 @@ pub fn probe_world(world: &World) -> FeatureReport {
             if h < 5 {
                 continue;
             }
-            // 表面被洞穴穿透：h 层（本应实体顶部）为空气
-            if world.voxel(IVec3::new(x, h, z)).is_solid() {
+            // 邻域（8 向）表面显著更高 => 本列顶部被洞穴挖穿形成开口。
+            let mut rim_max = i32::MIN;
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    rim_max = rim_max.max(at(x + dx, z + dz));
+                }
+            }
+            if rim_max - h < 4 {
                 continue;
             }
-            let mut depth = 0;
-            for y in (1..=h).rev() {
-                if world.voxel(IVec3::new(x, y, z)).is_solid() {
-                    break;
-                }
-                depth += 1;
-            }
-            if depth >= 4 {
-                let vol = flood_air_volume(world, IVec3::new(x, h - 2, z), 4000);
-                if vol >= 60 {
-                    cave_opening = Some(FeatureHit {
-                        name: "洞口",
-                        view_center: Vec3::new(x as f32, (h + 2) as f32, z as f32),
-                        voxel: Some(IVec3::new(x, h, z)),
-                        detail: format!("地表开口深 {depth}m 连通体积 {vol} @ ({x},{h},{z})"),
-                    });
-                    break 'opening;
-                }
+            // 开口向下的空气连通体积。
+            let vol = flood_air_volume(world, IVec3::new(x, h + 1, z), 4000);
+            if vol >= 60 {
+                cave_opening = Some(FeatureHit {
+                    name: "洞口",
+                    view_center: Vec3::new(x as f32, (h + 2) as f32, z as f32),
+                    voxel: Some(IVec3::new(x, h, z)),
+                    detail: format!("地表开口：本列顶 {h}m 低于邻域 {rim_max}m（-{}) 连通体积 {vol} @ ({x},{h},{z})", rim_max - h),
+                });
+                break 'opening;
             }
         }
     }
@@ -266,7 +280,10 @@ pub fn probe_world(world: &World) -> FeatureReport {
                                 name: "地下洞穴",
                                 view_center: vp.0,
                                 voxel: Some(vp.1),
-                                detail: format!("封闭腔体积 {vol} @ ({x},{y},{z})，内景位 {:?}", vp.1),
+                                detail: format!(
+                                    "封闭腔体积 {vol} @ ({x},{y},{z})，内景位 {:?}",
+                                    vp.1
+                                ),
                             });
                             break 'cave;
                         }
@@ -303,7 +320,14 @@ fn flood_air_volume(world: &World, start: IVec3, limit: usize) -> usize {
         if visited.len() >= limit {
             return visited.len();
         }
-        for d in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+        for d in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
             let n = v + IVec3::new(d.0, d.1, d.2);
             if !world.size.contains(n) || n.y < 0 {
                 continue;
@@ -327,7 +351,13 @@ fn find_interior_viewpoint(world: &World, near: IVec3) -> Option<(Vec3, IVec3)> 
         for dz in -8..=8 {
             for dx in -8..=8 {
                 let c = near + IVec3::new(dx, dy, dz);
-                if c.x < 3 || c.y < 4 || c.z < 3 || c.x >= world.size.x as i32 - 3 || c.z >= world.size.z as i32 - 3 || c.y >= world.size.y as i32 - 2 {
+                if c.x < 3
+                    || c.y < 4
+                    || c.z < 3
+                    || c.x >= world.size.x as i32 - 3
+                    || c.z >= world.size.z as i32 - 3
+                    || c.y >= world.size.y as i32 - 2
+                {
                     continue;
                 }
                 let mut ok = true;
@@ -361,6 +391,10 @@ mod tests {
         let seed = crate::config::DEFAULT_SEED;
         let world = World::generate_all(WorldSize::new(256, 128, 256), TerrainParams::new(seed));
         let report = probe_world(&world);
-        assert!(report.all_present(), "验收世界特征缺失: {}", report.summary());
+        assert!(
+            report.all_present(),
+            "验收世界特征缺失: {}",
+            report.summary()
+        );
     }
 }

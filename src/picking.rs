@@ -7,7 +7,6 @@ use crate::render::MainCamera;
 use crate::voxel::FaceDir;
 use crate::world::World;
 use bevy::prelude::*;
-use bevy::render::camera::Camera;
 use bevy::window::PrimaryWindow;
 
 #[derive(Clone, Copy, Debug)]
@@ -67,9 +66,27 @@ pub fn pick_voxel(world: &World, ray: &Ray, max_t: f32) -> Option<PickHit> {
     }
 
     let step = IVec3::new(
-        if dir.x > 0.0 { 1 } else if dir.x < 0.0 { -1 } else { 0 },
-        if dir.y > 0.0 { 1 } else if dir.y < 0.0 { -1 } else { 0 },
-        if dir.z > 0.0 { 1 } else if dir.z < 0.0 { -1 } else { 0 },
+        if dir.x > 0.0 {
+            1
+        } else if dir.x < 0.0 {
+            -1
+        } else {
+            0
+        },
+        if dir.y > 0.0 {
+            1
+        } else if dir.y < 0.0 {
+            -1
+        } else {
+            0
+        },
+        if dir.z > 0.0 {
+            1
+        } else if dir.z < 0.0 {
+            -1
+        } else {
+            0
+        },
     );
 
     // 各轴到下一个格线距离与跨一格的 t 增量。
@@ -77,17 +94,29 @@ pub fn pick_voxel(world: &World, ray: &Ray, max_t: f32) -> Option<PickHit> {
     let mut t_delta = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let o = ray.origin;
     if step.x != 0 {
-        let boundary = if step.x > 0 { voxel.x as f32 + 1.0 } else { voxel.x as f32 };
+        let boundary = if step.x > 0 {
+            voxel.x as f32 + 1.0
+        } else {
+            voxel.x as f32
+        };
         t_max.x = (boundary - o.x) / dir.x;
         t_delta.x = 1.0 / dir.x.abs();
     }
     if step.y != 0 {
-        let boundary = if step.y > 0 { voxel.y as f32 + 1.0 } else { voxel.y as f32 };
+        let boundary = if step.y > 0 {
+            voxel.y as f32 + 1.0
+        } else {
+            voxel.y as f32
+        };
         t_max.y = (boundary - o.y) / dir.y;
         t_delta.y = 1.0 / dir.y.abs();
     }
     if step.z != 0 {
-        let boundary = if step.z > 0 { voxel.z as f32 + 1.0 } else { voxel.z as f32 };
+        let boundary = if step.z > 0 {
+            voxel.z as f32 + 1.0
+        } else {
+            voxel.z as f32
+        };
         t_max.z = (boundary - o.z) / dir.z;
         t_delta.z = 1.0 / dir.z.abs();
     }
@@ -102,17 +131,29 @@ pub fn pick_voxel(world: &World, ray: &Ray, max_t: f32) -> Option<PickHit> {
             voxel.x += step.x;
             t = t_max.x;
             t_max.x += t_delta.x;
-            entered_from = Some(if step.x > 0 { FaceDir::NegX } else { FaceDir::PosX });
+            entered_from = Some(if step.x > 0 {
+                FaceDir::NegX
+            } else {
+                FaceDir::PosX
+            });
         } else if t_max.y <= t_max.z {
             voxel.y += step.y;
             t = t_max.y;
             t_max.y += t_delta.y;
-            entered_from = Some(if step.y > 0 { FaceDir::NegY } else { FaceDir::PosY });
+            entered_from = Some(if step.y > 0 {
+                FaceDir::NegY
+            } else {
+                FaceDir::PosY
+            });
         } else {
             voxel.z += step.z;
             t = t_max.z;
             t_max.z += t_delta.z;
-            entered_from = Some(if step.z > 0 { FaceDir::NegZ } else { FaceDir::PosZ });
+            entered_from = Some(if step.z > 0 {
+                FaceDir::NegZ
+            } else {
+                FaceDir::PosZ
+            });
         }
         if t > max_t {
             return None;
@@ -137,9 +178,17 @@ fn dir_to_entry_face(d: Vec3) -> FaceDir {
     let ay = d.y.abs();
     let az = d.z.abs();
     if ax >= ay && ax >= az {
-        if d.x >= 0.0 { FaceDir::PosX } else { FaceDir::NegX }
+        if d.x >= 0.0 {
+            FaceDir::PosX
+        } else {
+            FaceDir::NegX
+        }
     } else if ay >= az {
-        if d.y >= 0.0 { FaceDir::PosY } else { FaceDir::NegY }
+        if d.y >= 0.0 {
+            FaceDir::PosY
+        } else {
+            FaceDir::NegY
+        }
     } else if d.z >= 0.0 {
         FaceDir::PosZ
     } else {
@@ -198,8 +247,9 @@ pub fn picking_highlight_system(
         let v = hit.voxel;
         let center = Vec3::new(v.x as f32 + 0.5, v.y as f32 + 0.5, v.z as f32 + 0.5);
         // 命中体素白色线框。
-        gizmos.cuboid(
-            bevy::transform::components::Transform::from_translation(center).with_scale(Vec3::splat(1.04)),
+        gizmos.cube(
+            bevy::transform::components::Transform::from_translation(center)
+                .with_scale(Vec3::splat(1.04)),
             bevy::color::Color::WHITE,
         );
         // 命中面黄色描边（沿法线微偏移避免 z-fighting）。
@@ -237,13 +287,8 @@ mod tests {
 
     fn world_with(solid: &[IVec3]) -> World {
         let mut w = World::empty(WorldSize::new(48, 48, 48), TerrainParams::new(1));
-        for cy in 0..3 {
-            for cz in 0..3 {
-                for cx in 0..3 {
-                    w.ensure_chunk(IVec3::new(cx, cy, cz));
-                }
-            }
-        }
+        // 全部 chunk 置为已生成空气（ensure_chunk 会生成真实地形，不适合精确拾取断言）。
+        w.fill_air_all_for_test();
         for v in solid {
             w.set_voxel(*v, BlockId::Stone).unwrap();
         }
@@ -263,17 +308,20 @@ mod tests {
 
     #[test]
     fn diagonal_hit() {
+        // 垂直下射命中唯一实体顶面。
         let w = world_with(&[IVec3::new(10, 20, 10)]);
         let ray = Ray::normalized(Vec3::new(10.5, 40.5, 10.5), Vec3::new(0.0, -1.0, 0.0));
         let hit = pick_voxel(&w, &ray, 200.0).unwrap();
         assert_eq!(hit.voxel, IVec3::new(10, 20, 10));
 
-        // 斜 45° 射线
-        let ray = Ray::normalized(Vec3::new(0.5, 40.5, 0.5), Vec3::new(1.0, -1.0, 1.0).normalize());
-        let hit = pick_voxel(&w, &ray, 200.0).unwrap();
-        // 沿对角线 x=z, y 下降：x 从 0.5 -> 10 需要 9.5, y 从 40.5 -> 20.5 下降 20
-        // 相同 t 下 x 走 9.5*sqrt? 归一化后各分量 1/sqrt(3)。x 到 10.0 边界 t = 9.5*sqrt(3), y = 20*sqrt(3)... y 先到。
-        assert!(hit.voxel == IVec3::new(10, 20, 10) || hit.voxel == IVec3::new(9, 20, 9) || hit.voxel == IVec3::new(10, 21, 10));
+        // 斜 45°（x-y 平面内）：起点 (10.3, 30.5, 10.5)，方向 (1,-1,0)/√2。
+        // 路径格序列：(10,30,10)→(10,29,10)→(11,29,10)→(11,28,10)→(12,28,10)→(12,27,10)→(13,27,10)…
+        // 在 (13,27,10) 放置实体：射线于 s=2.7 处跨越 x=13 平面进入该体素（y=27.8），进入面为 NegX。
+        let w = world_with(&[IVec3::new(13, 27, 10)]);
+        let ray = Ray::normalized(Vec3::new(10.3, 30.5, 10.5), Vec3::new(1.0, -1.0, 0.0));
+        let hit = pick_voxel(&w, &ray, 50.0).unwrap();
+        assert_eq!(hit.voxel, IVec3::new(13, 27, 10));
+        assert_eq!(hit.face, FaceDir::NegX);
     }
 
     #[test]
@@ -298,7 +346,10 @@ mod tests {
     fn max_t_respected() {
         let w = world_with(&[IVec3::new(10, 20, 10)]);
         let ray = Ray::normalized(Vec3::new(10.5, 40.0, 10.5), Vec3::new(0.0, -1.0, 0.0));
-        assert!(pick_voxel(&w, &ray, 10.0).is_none(), "10m 内不应命中（目标在 19m）");
+        assert!(
+            pick_voxel(&w, &ray, 10.0).is_none(),
+            "10m 内不应命中（目标在 19m）"
+        );
         assert!(pick_voxel(&w, &ray, 19.5).is_some());
     }
 
@@ -332,11 +383,14 @@ mod tests {
         let mut hits = 0;
         for i in 0..8 {
             for k in 0..8 {
-                let x = 8 + i * 6 + 0.5;
-                let z = 8 + k * 6 + 0.5;
+                let x = (8 + i * 6) as f32 + 0.5;
+                let z = (8 + k * 6) as f32 + 0.5;
                 let ray = Ray::normalized(Vec3::new(x, 63.5, z), Vec3::new(0.0, -1.0, 0.0));
                 if let Some(hit) = pick_voxel(&w, &ray, 100.0) {
-                    assert!(hit.face == FaceDir::PosY || hit.voxel.y < 63, "命中面应为顶面（或洞口下行）");
+                    assert!(
+                        hit.face == FaceDir::PosY || hit.voxel.y < 63,
+                        "命中面应为顶面（或洞口下行）"
+                    );
                     hits += 1;
                 }
             }

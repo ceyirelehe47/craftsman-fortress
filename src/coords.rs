@@ -79,13 +79,23 @@ impl WorldSize {
 
     /// 体素坐标是否在验证世界范围内。
     pub fn contains(&self, v: IVec3) -> bool {
-        v.x >= 0 && v.y >= 0 && v.z >= 0 && (v.x as u32) < self.x && (v.y as u32) < self.y && (v.z as u32) < self.z
+        v.x >= 0
+            && v.y >= 0
+            && v.z >= 0
+            && (v.x as u32) < self.x
+            && (v.y as u32) < self.y
+            && (v.z as u32) < self.z
     }
 
     /// Chunk 坐标是否在验证世界范围内。
     pub fn contains_chunk(&self, cc: IVec3) -> bool {
         let n = self.chunks();
-        cc.x >= 0 && cc.y >= 0 && cc.z >= 0 && (cc.x as u32) < n.x && (cc.y as u32) < n.y && (cc.z as u32) < n.z
+        cc.x >= 0
+            && cc.y >= 0
+            && cc.z >= 0
+            && (cc.x as u32) < n.x
+            && (cc.y as u32) < n.y
+            && (cc.z as u32) < n.z
     }
 }
 

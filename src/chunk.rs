@@ -73,7 +73,9 @@ impl ChunkData {
         if self.palette.len() == 1 {
             return self.palette[0] == BlockId::Air;
         }
-        self.indices.iter().any(|&i| self.palette[i as usize] != BlockId::Air)
+        self.indices
+            .iter()
+            .any(|&i| self.palette[i as usize] != BlockId::Air)
             .not()
     }
 }

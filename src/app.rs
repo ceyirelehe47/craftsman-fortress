@@ -3,8 +3,8 @@
 use crate::acceptance::AcceptancePlugin;
 use crate::app_state::GameState;
 use crate::camera;
-use crate::coords::WorldSize;
 use crate::config::AppConfig;
+use crate::coords::WorldSize;
 use crate::diagnostics::{self, DiagHudText};
 use crate::generation::TerrainParams;
 use crate::meshing::DebugTint;
@@ -12,6 +12,7 @@ use crate::picking::{picking_highlight_system, CurrentPickRes, ScriptedRayRes};
 use crate::render::{self, LoadingText};
 use crate::world::World;
 use bevy::prelude::*;
+use bevy::text::FontSize;
 use bevy::time::Fixed;
 use bevy::window::{PresentMode, WindowResolution};
 
@@ -30,7 +31,8 @@ pub fn run() -> AppExit {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "工匠要塞：机械纪元 · 初版验证构建".into(),
-                    resolution: WindowResolution::new(cfg.window[0], cfg.window[1])
+                    // 0.19 起 WindowResolution::new 接受物理像素（u32）；启动时物理=逻辑。
+                    resolution: WindowResolution::new(cfg.window[0] as u32, cfg.window[1] as u32)
                         .with_scale_factor_override(1.0),
                     present_mode: PresentMode::Fifo,
                     ..Default::default()
@@ -90,7 +92,7 @@ fn spawn_ui_text(mut commands: Commands) {
     commands.spawn((
         Text::new("正在初始化…"),
         TextFont {
-            font_size: 26.0,
+            font_size: FontSize::Px(26.0),
             ..Default::default()
         },
         TextColor(Color::srgb(0.95, 0.96, 1.0)),
@@ -105,7 +107,7 @@ fn spawn_ui_text(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         TextFont {
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..Default::default()
         },
         TextColor(Color::srgb(0.97, 0.98, 1.0)),
@@ -122,7 +124,7 @@ fn spawn_ui_text(mut commands: Commands) {
             "WASD 平移 · R/F 升降 · Q/E 或左拖 旋转 · 右拖 平移 · 滚轮 缩放 · Shift 加速 · F3 Chunk 边界调试",
         ),
         TextFont {
-            font_size: 13.0,
+            font_size: FontSize::Px(13.0),
             ..Default::default()
         },
         TextColor(Color::srgb(0.85, 0.9, 0.95)),

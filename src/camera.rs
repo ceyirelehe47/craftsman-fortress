@@ -14,6 +14,10 @@ use bevy::prelude::*;
 
 use crate::app_state::GameState;
 
+/// 相机求解系统的调度集合（0.19 起 `before`/`after` 只接受 SystemSet）。
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraSolve;
+
 /// 俯仰角范围（弧度，相对水平面仰角）。
 pub const PITCH_MIN: f32 = 0.21; // ~12°
 pub const PITCH_MAX: f32 = 1.52; // ~87°
@@ -44,7 +48,13 @@ pub struct CameraRig {
 
 impl Default for CameraRig {
     fn default() -> Self {
-        Self::new((256.0, 128.0, 256.0), Vec3::new(128.0, 60.0, 128.0), 0.8, 0.9, 60.0)
+        Self::new(
+            (256.0, 128.0, 256.0),
+            Vec3::new(128.0, 60.0, 128.0),
+            0.8,
+            0.9,
+            60.0,
+        )
     }
 }
 
@@ -231,7 +241,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<CameraRigRes>();
     app.add_systems(
         Update,
-        (camera_input_system, camera_solve_system)
+        (camera_input_system, camera_solve_system.in_set(CameraSolve))
             .chain()
             .run_if(in_state(GameState::Ready)),
     );
@@ -243,7 +253,11 @@ fn init_rig_default(mut rig: ResMut<CameraRigRes>, world: Res<WorldRes>) {
     let world = world.world();
     let center = Vec3::new(world.size.x as f32 / 2.0, 40.0, world.size.z as f32 / 2.0);
     rig.0 = CameraRig::new(
-        (world.size.x as f32, world.size.y as f32, world.size.z as f32),
+        (
+            world.size.x as f32,
+            world.size.y as f32,
+            world.size.z as f32,
+        ),
         center,
         0.8,
         0.9,

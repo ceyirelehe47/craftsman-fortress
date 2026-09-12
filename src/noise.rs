@@ -18,7 +18,12 @@ pub fn mix64(mut z: u64) -> u64 {
 /// 二维整数格点哈希 -> `[0, 1)`。
 #[inline]
 pub fn hash2(seed: u64, x: i64, y: i64) -> f32 {
-    let h = mix64(seed ^ mix64((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)));
+    let h = mix64(
+        seed ^ mix64(
+            (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F),
+        ),
+    );
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
@@ -26,8 +31,7 @@ pub fn hash2(seed: u64, x: i64, y: i64) -> f32 {
 #[inline]
 pub fn hash3(seed: u64, x: i64, y: i64, z: i64) -> f32 {
     let h = mix64(
-        seed
-            ^ mix64((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        seed ^ mix64((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
             ^ mix64((y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
             ^ mix64((z as u64).wrapping_mul(0x27D4_EB4F_1656_6759)),
     );

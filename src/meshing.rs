@@ -46,12 +46,42 @@ pub enum DebugTint {
 fn face_corners(dir: FaceDir) -> [[f32; 3]; 4] {
     // 体素占据 [x, x+1]³。
     match dir {
-        FaceDir::PosX => [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 1.0]],
-        FaceDir::NegX => [[0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
-        FaceDir::PosY => [[0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0]],
-        FaceDir::NegY => [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
-        FaceDir::PosZ => [[1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]],
-        FaceDir::NegZ => [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        FaceDir::PosX => [
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ],
+        FaceDir::NegX => [
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        FaceDir::PosY => [
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0],
+        ],
+        FaceDir::NegY => [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+        FaceDir::PosZ => [
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+        FaceDir::NegZ => [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
     }
 }
 
@@ -74,7 +104,8 @@ pub fn build_chunk_mesh(world: &World, cc: IVec3, tint: DebugTint) -> ChunkMeshD
             for dx in -1..=1 {
                 let ncc = cc + IVec3::new(dx, dy, dz);
                 let idx = ((dy + 1) * 3 + (dz + 1)) * 3 + (dx + 1);
-                neighbor_data[idx as usize] = world.chunk(ncc).filter(|s| s.generated).map(|s| &s.data);
+                neighbor_data[idx as usize] =
+                    world.chunk(ncc).filter(|s| s.generated).map(|s| &s.data);
             }
         }
     }
@@ -158,16 +189,15 @@ pub fn build_chunk_mesh(world: &World, cc: IVec3, tint: DebugTint) -> ChunkMeshD
             let shade = dir.shade() * tint_factor;
             let n = [nx as f32, ny as f32, nz as f32];
             for c in corners {
-                mesh.positions.push([
-                    wx as f32 + c[0],
-                    wy as f32 + c[1],
-                    wz as f32 + c[2],
-                ]);
+                mesh.positions
+                    .push([wx as f32 + c[0], wy as f32 + c[1], wz as f32 + c[2]]);
                 mesh.normals.push(n);
-                mesh.colors.push([color[0] * shade, color[1] * shade, color[2] * shade]);
+                mesh.colors
+                    .push([color[0] * shade, color[1] * shade, color[2] * shade]);
             }
             // 两三角：base+0,+1,+2 与 base+0,+2,+3（corners 已按外向逆时针排列）。
-            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            mesh.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
     mesh
@@ -182,15 +212,8 @@ mod tests {
     /// 手工构造世界：填充指定体素集合，其余空气。
     fn world_with(size: WorldSize, solid: &[IVec3]) -> World {
         let mut w = World::empty(size, TerrainParams::new(1));
-        // 生成所有 chunk 为空气
-        let n = size.chunks();
-        for cy in 0..n.y as i32 {
-            for cz in 0..n.z as i32 {
-                for cx in 0..n.x as i32 {
-                    w.ensure_chunk(IVec3::new(cx, cy, cz));
-                }
-            }
-        }
+        // 全部 chunk 置为已生成空气（ensure_chunk 会生成真实地形，不适合精确面数断言）。
+        w.fill_air_all_for_test();
         for v in solid {
             w.set_voxel(*v, BlockId::Stone).unwrap();
         }
@@ -209,7 +232,10 @@ mod tests {
 
     #[test]
     fn adjacent_pair_hides_shared_faces() {
-        let w = world_with(WorldSize::new(16, 16, 16), &[IVec3::new(8, 8, 8), IVec3::new(9, 8, 8)]);
+        let w = world_with(
+            WorldSize::new(16, 16, 16),
+            &[IVec3::new(8, 8, 8), IVec3::new(9, 8, 8)],
+        );
         let m = build_chunk_mesh(&w, IVec3::ZERO, DebugTint::Off);
         assert_eq!(m.face_count(), 10, "两相邻体素应共 10 面（12 - 2 内部面）");
     }
@@ -217,12 +243,19 @@ mod tests {
     #[test]
     fn cross_chunk_pair_no_duplicate_interior_faces() {
         // 体素分属相邻 Chunk：x=15 在 chunk0，x=16 在 chunk1。
-        let w = world_with(WorldSize::new(32, 16, 32), &[IVec3::new(15, 8, 8), IVec3::new(16, 8, 8)]);
+        let w = world_with(
+            WorldSize::new(32, 16, 32),
+            &[IVec3::new(15, 8, 8), IVec3::new(16, 8, 8)],
+        );
         let m0 = build_chunk_mesh(&w, IVec3::new(0, 0, 0), DebugTint::Off);
         let m1 = build_chunk_mesh(&w, IVec3::new(1, 0, 0), DebugTint::Off);
         assert_eq!(m0.face_count(), 5, "chunk0 中该体素 +x 面被遮挡 => 5 面");
         assert_eq!(m1.face_count(), 5, "chunk1 中该体素 -x 面被遮挡 => 5 面");
-        assert_eq!(m0.face_count() + m1.face_count(), 10, "跨界相邻不得产生内部面");
+        assert_eq!(
+            m0.face_count() + m1.face_count(),
+            10,
+            "跨界相邻不得产生内部面"
+        );
     }
 
     #[test]
@@ -265,7 +298,7 @@ mod tests {
             assert!((ix as usize) < m.vertex_count());
         }
         // 每个三角形面元法线（叉积）应与顶点法线一致（同向），验证绕序朝外。
-        for tri in m.indices.chunks_exact(3) {
+        for tri in m.indices.as_chunks::<3>().0 {
             let a = m.positions[tri[0] as usize];
             let b = m.positions[tri[1] as usize];
             let c = m.positions[tri[2] as usize];
@@ -311,7 +344,8 @@ mod tests {
         for cy in 0..4 {
             for cz in 0..4 {
                 for cx in 0..4 {
-                    total_faces += build_chunk_mesh(&w, IVec3::new(cx, cy, cz), DebugTint::Off).face_count();
+                    total_faces +=
+                        build_chunk_mesh(&w, IVec3::new(cx, cy, cz), DebugTint::Off).face_count();
                 }
             }
         }
