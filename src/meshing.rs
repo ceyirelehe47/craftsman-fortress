@@ -16,7 +16,8 @@ use bevy::math::{IVec3, UVec3};
 pub struct ChunkMeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
-    pub colors: Vec<[f32; 3]>,
+    /// 顶点色（RGBA；Bevy 的 `ATTRIBUTE_COLOR` 要求 Float32x4）。
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -192,8 +193,12 @@ pub fn build_chunk_mesh(world: &World, cc: IVec3, tint: DebugTint) -> ChunkMeshD
                 mesh.positions
                     .push([wx as f32 + c[0], wy as f32 + c[1], wz as f32 + c[2]]);
                 mesh.normals.push(n);
-                mesh.colors
-                    .push([color[0] * shade, color[1] * shade, color[2] * shade]);
+                mesh.colors.push([
+                    color[0] * shade,
+                    color[1] * shade,
+                    color[2] * shade,
+                    1.0,
+                ]);
             }
             // 两三角：base+0,+1,+2 与 base+0,+2,+3（corners 已按外向逆时针排列）。
             mesh.indices
