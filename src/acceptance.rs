@@ -277,7 +277,10 @@ impl Plugin for AcceptancePlugin {
         app.add_systems(
             Update,
             (
-                acceptance_control.before(camera::CameraSolve),
+                // 在相机求解之后采样/接管：A06-A08 采样读到的是本帧位姿经
+                // 碰撞钳制后的真实眼位，而不是"上帧距离 + 本帧位姿"的瞬态。
+                // 脚本位姿写入滞后求解一帧（~4ms），对 628s 巡航无影响。
+                acceptance_control.after(camera::CameraSolve),
                 process_shot_queue.after(camera::CameraSolve),
             )
                 .run_if(in_state(GameState::Ready)),
@@ -779,9 +782,12 @@ fn acceptance_control(
         // 限位
         if rig.0.pitch < PITCH_MIN - 1e-3
             || rig.0.pitch > PITCH_MAX + 1e-3
+            || rig.0.target_dist > DIST_MAX + 1e-2
+            || rig.0.target_dist < 1.4
             || rig.0.dist > DIST_MAX + 1e-2
-            || rig.0.dist < 1.4
         {
+            // 距离下限只约束意图值 target_dist（脚本 ≥1.5 / 用户 ≥6）；
+            // 实际 dist 允许被碰撞钳制收缩到 0（眼位退到焦点）。
             acc.clamp_violations += 1;
         }
         // 相机不得在实体内（A08）

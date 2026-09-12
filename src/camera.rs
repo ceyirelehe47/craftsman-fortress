@@ -2,8 +2,8 @@
 //!
 //! - Perspective 投影，围绕可移动"焦点"旋转 / 俯仰 / 缩放；
 //! - 俯仰、距离、焦点范围全部受限且稳定；
-//! - 相机不得停留于实体体素内：从焦点向相机方向做 DDA，命中则压缩轨道距离；
-//!   一阶指数平滑收敛，无振荡（A08）；
+//! - 相机不得停留于实体体素内：从焦点向相机方向做 DDA，命中则压缩轨道距离
+//!   （可收缩至 0，眼位退到焦点）；一阶指数平滑收敛，无振荡（A08）；
 //! - 验收模式由脚本注入位姿（`control_locked` 锁定用户输入）。
 
 use crate::picking::{pick_voxel, Ray};
@@ -125,10 +125,13 @@ impl CameraRig {
             dir,
         };
         let limit = match pick_voxel(world, &ray, self.target_dist + COLLISION_MARGIN) {
-            Some(hit) => (hit.t - COLLISION_MARGIN).max(1.5),
+            // 眼位必须留在命中面外侧 margin 处。命中面距焦点不足 margin
+            // （含 t=0：焦点恰在墙面上——如边界钳制线 z=8 与谷壁平面重合）
+            // 时收缩到 0：眼位退到焦点（空气），绝不允许被距离下限顶回实体。
+            Some(hit) => (hit.t - COLLISION_MARGIN).max(0.0),
             None => self.target_dist,
         };
-        limit.min(self.target_dist).max(1.5)
+        limit.min(self.target_dist)
     }
 }
 
@@ -224,7 +227,8 @@ pub fn camera_solve_system(
     let alpha = 1.0 - (-dt * DIST_SMOOTHING).exp();
     rig.dist += (rig.target_dist - rig.dist) * alpha;
     rig.dist = rig.dist.min(clamped);
-    rig.dist = rig.dist.clamp(1.5, DIST_MAX);
+    // 下限 0：碰撞钳制允许距离收缩到 0（眼位退到焦点），求解层不得反弹。
+    rig.dist = rig.dist.clamp(0.0, DIST_MAX);
     let eye = rig.eye();
     transform.translation = eye;
     transform.look_at(rig.focus, Vec3::Y);
@@ -274,4 +278,111 @@ fn init_rig_default(mut rig: ResMut<CameraRigRes>, world: Res<WorldRes>) {
         0.9,
         60.0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generation::TerrainParams;
+    use crate::voxel::BlockId;
+
+    /// 空气世界 + 指定实体体素（不动 dirty 集，纯查询测试）。
+    fn world_with(solid: &[IVec3]) -> World {
+        let mut w = World::empty(
+            crate::coords::WorldSize::new(64, 64, 64),
+            TerrainParams::new(1),
+        );
+        w.fill_air_all_for_test();
+        for v in solid {
+            w.set_voxel(*v, BlockId::Stone).unwrap();
+        }
+        w
+    }
+
+    /// 焦点恰在墙面（z=8.0 整数格线，邻列 z=7 为 51m 实体柱）时，
+    /// 碰撞钳制必须把距离收缩到 0（眼位退到焦点空气格），
+    /// 而不是被距离下限顶进实体（A08 第一轮根因，run4 首例 (122,40,4)）。
+    #[test]
+    fn collision_focus_on_wall_plane_collapses_dist_to_zero() {
+        let mut solid = Vec::new();
+        // z=7 列：高度 40 的实体柱（焦点高度 34 朝 -z 必然命中）。
+        for y in 0..40 {
+            for x in 8..14 {
+                solid.push(IVec3::new(x, y, 7));
+            }
+        }
+        let world = world_with(&solid);
+        let rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(11.0, 34.0, 8.0),
+            3.5,  // yaw 朝 -z
+            0.30, // 低角度
+            8.0,
+        );
+        let d = rig.collision_clamped_dist(&world);
+        assert_eq!(d, 0.0, "焦点贴墙面时距离应收缩到 0");
+        let eye = {
+            let mut r = rig.clone();
+            r.dist = d;
+            r.desired_eye()
+        };
+        let v = IVec3::new(
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        );
+        assert!(!world.voxel(v).is_solid(), "眼位 {eye:?} 不得在实体内");
+    }
+
+    /// 墙面距焦点 ~2.5m 且足够高：距离收缩到 hit.t - margin，眼位留在空气侧。
+    #[test]
+    fn collision_shrinks_to_margin_before_wall() {
+        let mut solid = Vec::new();
+        // x=7..14、y=8..14、z=4..7 的实体墙（射线含 -x 漂移与 +0.21 rad 抬升仍命中）。
+        for y in 8..14 {
+            for z in 4..7 {
+                for x in 7..14 {
+                    solid.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let world = world_with(&solid);
+        let rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(10.5, 10.5, 9.5),
+            3.5,
+            PITCH_MIN, // 微小抬升，保证非退化方向
+            30.0,
+        );
+        let d = rig.collision_clamped_dist(&world);
+        assert!(d < 30.0, "应发生碰撞收缩，实际 {d}");
+        let eye = {
+            let mut r = rig.clone();
+            r.dist = d;
+            r.desired_eye()
+        };
+        let v = IVec3::new(
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        );
+        assert!(
+            !world.voxel(v).is_solid(),
+            "收缩后眼位 {eye:?} 不得在实体内"
+        );
+    }
+
+    /// 无命中：距离保持目标值不变。
+    #[test]
+    fn collision_no_hit_keeps_target_dist() {
+        let world = world_with(&[]);
+        let rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(32.0, 40.0, 32.0),
+            0.8,
+            0.9,
+            60.0,
+        );
+        assert_eq!(rig.collision_clamped_dist(&world), 60.0);
+    }
 }
