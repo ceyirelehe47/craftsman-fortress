@@ -93,6 +93,14 @@ impl CameraRig {
         )
     }
 
+    /// 期望眼位（用户/脚本目标距离版，不含碰撞与平滑）。
+    /// 验收的"控制连续性"断言基于它——碰撞收缩是安全机制，其速度由几何需要决定。
+    pub fn target_eye(&self) -> Vec3 {
+        let mut rig = self.clone();
+        rig.dist = rig.target_dist;
+        rig.desired_eye()
+    }
+
     /// 按当前实际距离求相机位置（供系统写入 Transform）。
     pub fn eye(&self) -> Vec3 {
         let mut rig = self.clone();
@@ -210,9 +218,12 @@ pub fn camera_solve_system(
     let rig = &mut rig.0;
     let dt = time.delta_secs().min(0.1);
     let clamped = rig.collision_clamped_dist(world);
-    // 一阶指数平滑（无振荡）。
+    // 平滑只作用于"放宽"方向：先向用户目标距离收敛，再被碰撞上限硬性钳住。
+    // 收缩即时（防穿模优先，消除平滑超前导致的瞬态入模）；clamped 由几何决定、
+    // 不依赖 dist，无反馈回路 => 不可能振荡（A08）。
     let alpha = 1.0 - (-dt * DIST_SMOOTHING).exp();
-    rig.dist += (clamped - rig.dist) * alpha;
+    rig.dist += (rig.target_dist - rig.dist) * alpha;
+    rig.dist = rig.dist.min(clamped);
     rig.dist = rig.dist.clamp(1.5, DIST_MAX);
     let eye = rig.eye();
     transform.translation = eye;

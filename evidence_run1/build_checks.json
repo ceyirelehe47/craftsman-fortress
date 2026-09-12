@@ -1,0 +1,6 @@
+{
+  "fmt": true,
+  "clippy": true,
+  "tests": true,
+  "release_build": true
+}

@@ -233,10 +233,16 @@ fn count_visible_unready(
                 if dx * dx + dz * dz > r_chunks * r_chunks {
                     continue;
                 }
-                if !registry
-                    .entries
-                    .contains_key(&bevy::math::IVec3::new(cx, cy, cz))
-                {
+                let cc = bevy::math::IVec3::new(cx, cy, cz);
+                // 已生成且为全空气的 Chunk 无需 Mesh 实体（meshing 约定），
+                // 不算"未准备"；只有未生成、或非空却缺 Mesh 才是未准备。
+                let ready = match world.chunk(cc) {
+                    Some(slot) if slot.generated => {
+                        slot.data.is_empty() || registry.entries.contains_key(&cc)
+                    }
+                    _ => false,
+                };
+                if !ready {
                     unready += 1;
                 }
             }

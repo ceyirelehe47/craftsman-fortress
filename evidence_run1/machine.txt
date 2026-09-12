@@ -1,0 +1,5 @@
+os: MINGW64_NT-10.0-26200 3.6.9-b4195d69.x86_64 x86_64
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+date: 2026-09-13T01:02:54+08:00
+logical_cores: 16

@@ -251,6 +251,18 @@ pub fn probe_world(world: &World) -> FeatureReport {
             if rim_max - h < 4 {
                 continue;
             }
+            // 本列自顶部向下需有 ≥4 的竖直空气井（保证"井射"拾取断言可复现：
+            // 垂直射线穿过开口必然在开口表面之下命中）。
+            let mut shaft = 0;
+            for y in (0..h).rev() {
+                if world.voxel(IVec3::new(x, y, z)).is_solid() {
+                    break;
+                }
+                shaft += 1;
+            }
+            if shaft < 4 {
+                continue;
+            }
             // 开口向下的空气连通体积。
             let vol = flood_air_volume(world, IVec3::new(x, h + 1, z), 4000);
             if vol >= 60 {
