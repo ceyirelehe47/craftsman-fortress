@@ -34,8 +34,11 @@ const T_FINALIZE: f64 = 628.0;
 const GIF_INTERVAL: f64 = 4.0;
 /// GIF 帧尺寸。
 const GIF_SIZE: (u32, u32) = (480, 270);
-/// 巡航内相机最大移动速度（m/s，用于"无跳变"判定）。
-const MAX_EYE_SPEED: f32 = 90.0;
+/// 巡航内相机期望眼位最大移动速度（m/s，用于"无跳变"判定）。
+/// 推导：360° 旋转段 = 轨道半径 95 m × 角速度 2π/8s ≈ 74.6 m/s 的切向速度，
+/// 与焦点平移（~25 m/s）矢量叠加可达 ~100 m/s；取 150 留出余量。
+/// 断言意图是"控制流连续无跳变"，阈值由脚本运动学决定（段切换帧已豁免）。
+const MAX_EYE_SPEED: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Pose {
@@ -707,7 +710,9 @@ fn acceptance_control(
     acc.last_segment_idx = idx;
     let seg = acc.segments[idx].clone();
     let u = ((t - seg.t0) / (seg.t1 - seg.t0).max(1e-9)).clamp(0.0, 1.0);
-    let e = smoothstep(u);
+    // cut 段：整段直接位于目标位姿（焦点也瞬移）。若只瞬移 dist 而焦点仍 lerp，
+    // 过渡路径会直线穿山——相机与焦点长时间停留在实体内（A08）。
+    let e = if seg.cut { 1.0 } else { smoothstep(u) };
     let lerp = |a: f32, b: f32, u: f64| a + (b - a) * u as f32;
     let mut focus = Vec3::new(
         lerp(seg.from.focus.x, seg.to.focus.x, e),
@@ -806,6 +811,13 @@ fn acceptance_control(
                 let speed = (target_eye - last).length() / dt;
                 if speed > MAX_EYE_SPEED {
                     acc.speed_violations += 1;
+                    // 限流样本日志（前 3 次），便于证据复核。
+                    if acc.speed_violations <= 3 {
+                        info!(
+                            "[验收/A06] speed 样本: t={t:.2} speed={speed:.0}m/s dt={dt:.4} eye=({:.1},{:.1},{:.1}) last=({:.1},{:.1},{:.1})",
+                            target_eye.x, target_eye.y, target_eye.z, last.x, last.y, last.z
+                        );
+                    }
                 }
             }
         }
