@@ -193,12 +193,8 @@ pub fn build_chunk_mesh(world: &World, cc: IVec3, tint: DebugTint) -> ChunkMeshD
                 mesh.positions
                     .push([wx as f32 + c[0], wy as f32 + c[1], wz as f32 + c[2]]);
                 mesh.normals.push(n);
-                mesh.colors.push([
-                    color[0] * shade,
-                    color[1] * shade,
-                    color[2] * shade,
-                    1.0,
-                ]);
+                mesh.colors
+                    .push([color[0] * shade, color[1] * shade, color[2] * shade, 1.0]);
             }
             // 两三角：base+0,+1,+2 与 base+0,+2,+3（corners 已按外向逆时针排列）。
             mesh.indices
