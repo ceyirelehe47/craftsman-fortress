@@ -781,7 +781,16 @@ fn acceptance_control(
         // 碰撞收缩是安全机制，其眼位速度由几何需要决定，不属"控制跳变"。
         // 用位移而非速度：速度阈值会随帧率缩放（240 fps 下平滑运动的
         // smoothstep 峰值即超 200 m/s），位移阈值帧率无关。
-        let target_eye = rig.0.target_eye();
+        // 断言对象是"本帧将要应用的位姿"（控制信号）与上帧位姿的差：
+        // 段切换/瞬移恰好出现在 seg_changed 帧，豁免配对才正确
+        // （若用 rig 上帧位姿，跳变样本会滞后一帧、逃出豁免——run6 教训）。
+        let mut ctrl = rig.0.clone();
+        ctrl.focus = focus;
+        ctrl.yaw = yaw;
+        ctrl.pitch = pitch;
+        ctrl.target_dist = target_dist.max(1.5);
+        ctrl.clamp_all();
+        let target_eye = ctrl.target_eye();
         if let Some(last) = acc.last_eye {
             if t >= T_CRUISE_START && !seg_changed {
                 let step = (target_eye - last).length();
