@@ -36,9 +36,12 @@ CLIPPY_OK=true
 
 # ---------------------------------------------------------------------------
 step "A01-3/6 依赖版本审计（Bevy 必须仅为 0.19 系列）"
-# 提取依赖树中所有 bevy/bevy_* crate 的版本，断言均为 0.19.x。
+# 提取依赖树中所有 bevy/bevy_* crate 的版本，断言引擎系列均为 0.19.x。
+# 白名单：bevy_mikktspace 是独立版本线的官方合作库（由 bevy_render 0.19.1 自带依赖，
+# 版本号不随 bevy 主版本同步），不属于引擎主版本系列。
 BEVY_VERS=$(cargo tree -e normal --format '{p}' 2>/dev/null \
   | grep -E '(^| )bevy(_[a-z_]+)? v' \
+  | grep -v 'bevy_mikktspace ' \
   | sed -E 's/.*bevy(_[a-z_]+)? v([0-9]+\.[0-9]+\.[0-9]+).*/\2/' \
   | sort -u)
 echo "依赖树中的 bevy 版本："
