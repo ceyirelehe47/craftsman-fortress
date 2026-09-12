@@ -10,6 +10,7 @@ use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::view::window::screenshot::{Screenshot, ScreenshotCaptured};
 
 /// 主相机标记（相机求解、拾取、截图都引用它）。
 #[derive(Component)]
@@ -85,6 +86,7 @@ pub fn plugin(app: &mut App) {
         (
             rebuild_dirty_system.run_if(in_state(GameState::Ready)),
             toggle_tint_system.run_if(in_state(GameState::Ready)),
+            debug_screenshot_system.run_if(in_state(GameState::Ready)),
         ),
     );
 }
@@ -113,20 +115,17 @@ fn setup_scene(mut commands: Commands) {
                 start: 130.0,
                 end: 380.0,
             },
-            directional_light_color: Color::srgb(1.0, 0.98, 0.92),
-            directional_light_exponent: 0.0,
+            // 禁用雾的"太阳辉光"散射：shader 对 dot<=0 的视线取
+            // pow(0, exponent)，exponent=0 时为 WGSL 未定义行为（NaN），
+            // 且 NaN 会经 mix 污染整个片元（即使雾 alpha=0）导致全黑。
+            // Color::NONE（alpha=0）使 shader 跳过该分支，是官方文档指定的禁用方式。
+            directional_light_color: Color::NONE,
+            directional_light_exponent: 8.0,
         },
     ));
 
-    // 主方向光（无阴影贴图：烘焙面着色已保证可读性，降低初版开销，见决策记录）。
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 14000.0,
-            shadow_maps_enabled: false,
-            ..Default::default()
-        },
-        Transform::from_xyz(120.0, 180.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    // 光照说明：本版无独立光源——材质为 unlit，明暗来自 meshing 烘焙的
+    // 面朝向系数（见 create_material 注释与决策记录"渲染/光照模型"）。
 }
 
 pub fn sky_color() -> Color {
@@ -143,6 +142,10 @@ fn create_material(
 ) {
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
+        // unlit + 烘焙顶点色（meshing 按 FaceDir 乘 0.55..1.0 明暗）是本版的光照模型：
+        // 方向光无阴影贴图会把背光面压成死黑、并把阳光"泄漏"进洞穴；
+        // 烘焙面着色让任意朝向的面都保持调色板可读性（任务书 4.4）。
+        unlit: true,
         ..Default::default()
     });
     handle.0 = Some(mat);
@@ -343,4 +346,28 @@ fn toggle_tint_system(
         }
         info!("调试着色切换为 {:?}", tint.0);
     }
+}
+
+/// F12 调试截图：走与验收相同的 Screenshot 管线，保存到工作目录。
+fn debug_screenshot_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    mut counter: Local<u32>,
+) {
+    if !keys.just_pressed(KeyCode::F12) {
+        return;
+    }
+    *counter += 1;
+    let path = std::path::PathBuf::from(format!("debug_shot_{}.png", *counter));
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(move |trigger: On<ScreenshotCaptured>| {
+            let img: bevy::image::Image = std::ops::Deref::deref(trigger.event()).clone();
+            match crate::acceptance::save_screenshot(&img, &path, false) {
+                Ok((w, h, bytes)) => {
+                    info!("[调试] F12 截图已保存 {path:?}: {w}x{h}, {bytes}B");
+                }
+                Err(e) => info!("[调试] F12 截图保存失败 {path:?}: {e}"),
+            }
+        });
 }

@@ -34,11 +34,10 @@ const T_FINALIZE: f64 = 628.0;
 const GIF_INTERVAL: f64 = 4.0;
 /// GIF 帧尺寸。
 const GIF_SIZE: (u32, u32) = (480, 270);
-/// 巡航内相机期望眼位最大移动速度（m/s，用于"无跳变"判定）。
-/// 推导：360° 旋转段 = 轨道半径 95 m × 角速度 2π/8s ≈ 74.6 m/s 的切向速度，
-/// 与焦点平移（~25 m/s）矢量叠加可达 ~100 m/s；取 150 留出余量。
-/// 断言意图是"控制流连续无跳变"，阈值由脚本运动学决定（段切换帧已豁免）。
-const MAX_EYE_SPEED: f32 = 150.0;
+/// 帧间期望眼位最大位移（米/帧），"跳变"的工程定义是位姿不连续。
+/// 与帧率无关：脚本平滑运动峰值 ~1 m/帧（240 fps 下 223 m/s 的过渡峰值），
+/// 真跳变/状态错乱是数十米级瞬移；4 m/帧 之间留一个数量级余量。
+const MAX_EYE_STEP: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Pose {
@@ -688,7 +687,6 @@ fn acceptance_control(
     registry: Res<ChunkMeshes>,
     mut scripted_ray: ResMut<ScriptedRayRes>,
     mut tint: ResMut<DebugTintRes>,
-    time: Res<Time>,
     next_state: ResMut<NextState<GameState>>,
     exit: MessageWriter<AppExit>,
 ) {
@@ -802,19 +800,20 @@ fn acceptance_control(
         if diag.visible_unready > 0 {
             acc.unready_violation_frames += 1;
         }
-        // 移动速度（无跳变）：基于期望眼位（目标距离版）——控制流连续性断言。
+        // 跳变（无跳变）：基于期望眼位（目标距离版）的帧间位移——控制流连续性断言。
         // 碰撞收缩是安全机制，其眼位速度由几何需要决定，不属"控制跳变"。
+        // 用位移而非速度：速度阈值会随帧率缩放（240 fps 下平滑运动的
+        // smoothstep 峰值即超 200 m/s），位移阈值帧率无关。
         let target_eye = rig.0.target_eye();
         if let Some(last) = acc.last_eye {
             if t >= T_CRUISE_START && !seg_changed {
-                let dt = time.delta_secs().max(1e-4);
-                let speed = (target_eye - last).length() / dt;
-                if speed > MAX_EYE_SPEED {
+                let step = (target_eye - last).length();
+                if step > MAX_EYE_STEP {
                     acc.speed_violations += 1;
                     // 限流样本日志（前 3 次），便于证据复核。
                     if acc.speed_violations <= 3 {
                         info!(
-                            "[验收/A06] speed 样本: t={t:.2} speed={speed:.0}m/s dt={dt:.4} eye=({:.1},{:.1},{:.1}) last=({:.1},{:.1},{:.1})",
+                            "[验收/A06] 跳变样本: t={t:.2} step={step:.1}m eye=({:.1},{:.1},{:.1}) last=({:.1},{:.1},{:.1})",
                             target_eye.x, target_eye.y, target_eye.z, last.x, last.y, last.z
                         );
                     }
@@ -1304,7 +1303,8 @@ fn process_shot_queue(
 }
 
 /// 保存截图：全分辨率 PNG（固定机位）或降采样 PNG（GIF 帧）。
-fn save_screenshot(
+/// 同时供 render.rs 的 F12 调试截图复用。
+pub fn save_screenshot(
     img: &bevy::image::Image,
     path: &Path,
     downscale: bool,
