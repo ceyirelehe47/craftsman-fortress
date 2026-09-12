@@ -276,7 +276,7 @@ fn loading_progress_system(
     };
     if let Ok(mut text) = loading_text.single_mut() {
         **text = format!(
-            "工匠要塞 · 初版验证世界\n生成 {:>4}/{} · 网格 {:>4}/{} · {:>2}%",
+            "Craftsman Fortress · loading world\nGen {:>4}/{} · Mesh {:>4}/{} · {:>2}%",
             cursor.gen_next, total, cursor.mesh_next, total, pct
         );
     }

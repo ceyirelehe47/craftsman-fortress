@@ -87,10 +87,12 @@ pub fn run() -> AppExit {
     app.run()
 }
 
-/// 生成中文 UI：加载进度 + 调试 HUD + 帮助。
+/// 生成 UI：加载进度 + 调试 HUD + 帮助。
+/// 应用内文本一律 ASCII：Bevy 默认字体无 CJK 字形（渲染为方块），
+/// 中文 UI 待正式字体管线（决策记录"文本/字体"）。
 fn spawn_ui_text(mut commands: Commands) {
     commands.spawn((
-        Text::new("正在初始化…"),
+        Text::new("Initializing..."),
         TextFont {
             font_size: FontSize::Px(26.0),
             ..Default::default()
@@ -121,7 +123,7 @@ fn spawn_ui_text(mut commands: Commands) {
     ));
     commands.spawn((
         Text::new(
-            "WASD 平移 · R/F 升降 · Q/E 或左拖 旋转 · 右拖 平移 · 滚轮 缩放 · Shift 加速 · F3 Chunk 边界调试",
+            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Shift fast · F3 chunk tint · F12 screenshot",
         ),
         TextFont {
             font_size: FontSize::Px(13.0),

@@ -54,7 +54,7 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 | 截图 API | `acceptance.rs::process_shot_queue` | `bevy::render::view::window::screenshot`；observer 闭包 `On<ScreenshotCaptured>` |
 | 观察者/消息系统 | `acceptance.rs` | `On`（0.17 起，原 `Trigger`）、`MessageWriter`（原 `EventWriter`） |
 | 系统排序 | `camera.rs::CameraSolve`（SystemSet） | 0.19 起 `before/after` 只接受 SystemSet |
-| DirectionalLight 字段 | `render.rs::setup_scene` | `shadow_maps_enabled`（原 `shadows_enabled`） |
+| DirectionalLight 字段 | `render.rs::setup_scene` | `shadow_maps_enabled`（原 `shadows_enabled`）；**后已移除方向光**：光照模型改为 unlit + 烘焙顶点色明暗（决策记录 D-13） |
 | UI 文本 | `app.rs::spawn_ui_text` | `TextFont.font_size: FontSize::Px(f32)`（0.19） |
 | Gizmos | `picking.rs` | `gizmos.cube`（0.18 起，原 `cuboid`） |
 | 第三方（非 Bevy 插件） | `Cargo.toml` | `image 0.25`（PNG/GIF 证据编码）、`sysinfo 0.33`（RSS） |

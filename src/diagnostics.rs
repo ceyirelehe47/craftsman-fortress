@@ -134,17 +134,19 @@ fn diagnostics_update(
             .as_ref()
             .map(|h| {
                 format!(
-                    "({},{},{}) 面 {:?}",
+                    "({},{},{}) face {:?}",
                     h.voxel.x, h.voxel.y, h.voxel.z, h.face
                 )
             })
-            .unwrap_or_else(|| "无".into());
+            .unwrap_or_else(|| "none".into());
+        // HUD 标签用 ASCII：Bevy 默认字体无 CJK 字形（会渲染为方块）；
+        // 中文 HUD 待正式字体管线（决策记录"文本/字体"）。
         let text = format!(
-            "Seed {} · 世界 {}×{}×{} · Chunk 16³ · TPS {:.1} (#{})\n\
-             FPS {:.1} · 帧 {:.1}ms · RSS {:.0}MB\n\
-             相机 ({:.1},{:.1},{:.1}) 焦点 ({:.1},{:.1},{:.1}) 距离 {:.1}m 俯仰 {:.0}°\n\
-             Chunk 已生成 {}/{} · 已Mesh {} · 脏 {} · 可见未准备 {}\n\
-             拾取: {}",
+            "Seed {} · World {}x{}x{} · Chunk 16^3 · TPS {:.1} (#{})\n\
+             FPS {:.1} · Frame {:.1}ms · RSS {:.0}MB\n\
+             Cam ({:.1},{:.1},{:.1}) · Focus ({:.1},{:.1},{:.1}) · Dist {:.1}m · Pitch {:.0}deg\n\
+             Chunks gen {}/{} · meshed {} · dirty {} · visible-unready {}\n\
+             Pick: {}",
             world.params.seed,
             world.size.x,
             world.size.y,
