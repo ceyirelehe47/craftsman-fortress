@@ -1,0 +1,17 @@
+[package]
+name = "craftsman_fortress"
+version = "0.1.0"
+edition = "2021"
+description = "《工匠要塞：机械纪元》初版验证构建：体素世界 + 自由透视相机（任务书 V0.1 切片）"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# 任务书硬性约束：基线冻结在 Bevy 0.19 系列（=0.19.1），禁止解析到 0.20+；实际版本由 Cargo.lock 固定。
+bevy = "=0.19.1"
+# PNG（截图证据）与 GIF（巡航录像）编码；版本需与 bevy 0.19 的 image 依赖线兼容，由 cargo 统一。
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+# 进程 RSS 采样（验收 A12 资源稳定性证据）。
+sysinfo = "0.33"
+
+[profile.release]
+# 默认 opt-level=3；不开启 LTO 以缩短验收构建时间（性能余量充足，见决策记录）。
