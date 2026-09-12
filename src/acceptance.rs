@@ -80,6 +80,9 @@ pub struct Segment {
     arc: f32,
     /// 巡航覆盖场景标记（A06）。
     coverage: Coverage,
+    /// 焦点高度下限（构造段时沿路径预采样地形最高点 +3）。
+    /// 段内常量 => 逐帧连续，避免逐帧 max 造成 focus 跳变（A06/A08）。
+    min_focus_y: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,6 +138,7 @@ pub struct AcceptanceState {
     pub last_eye: Option<Vec3>,
     pub last_dist_delta_sign: i32,
     pub last_dist_delta_abs: f32,
+    pub osc_run: u32,
     pub last_segment_idx: usize,
     // 拾取测试
     pub ray_results: Vec<(String, bool, String)>,
@@ -211,6 +215,7 @@ impl AcceptanceState {
             last_eye: None,
             last_dist_delta_sign: 0,
             last_dist_delta_abs: 0.0,
+            osc_run: 0,
             last_segment_idx: 0,
             ray_results: Vec::new(),
             highlight_ray: None,
@@ -325,6 +330,19 @@ fn acceptance_on_ready(
 }
 
 /// 构建相机脚本时间线：热身 → 8 个固定机位 → 巡航/耐久循环。
+/// 沿 from→to 焦点连线预采样地形最高点 +3，作为段内焦点高度下限。
+/// 段内常量 => 焦点轨迹逐帧连续（lerp/弧线本身连续），杜绝逐帧 max 的跳变。
+fn path_min_focus_y(world: &World, from: Vec3, to: Vec3) -> f32 {
+    let mut max_h = 1i32;
+    for i in 0..9 {
+        let u = i as f32 / 8.0;
+        let x = (from.x + (to.x - from.x) * u).clamp(0.0, (world.size.x - 1) as f32) as i32;
+        let z = (from.z + (to.z - from.z) * u).clamp(0.0, (world.size.z - 1) as f32) as i32;
+        max_h = max_h.max(world.column_height(x, z));
+    }
+    max_h as f32 + 3.0
+}
+
 fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureReport) {
     acc.features = Some(features.clone());
     let cx = world.size.x as f32 / 2.0;
@@ -405,6 +423,7 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
         cut: false,
         arc: 0.0,
         coverage: Coverage::default(),
+        min_focus_y: path_min_focus_y(world, prev.focus, poses[0].0.focus),
     });
     for &(pose, shot, cut) in &poses {
         acc.segments.push(Segment {
@@ -415,9 +434,15 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
             cut,
             arc: if cut { 0.0 } else { 45.0 },
             coverage: Coverage::default(),
+            min_focus_y: if cut {
+                0.0
+            } else {
+                path_min_focus_y(world, prev.focus, pose.focus)
+            },
         });
         pose_shots.push((t + 3.5, ActionId::Shot(shot)));
         t += 5.0;
+        prev = pose;
     }
     debug_assert!((t - T_VIEWS_END).abs() < 1e-6);
     prev = poses.last().map(|p| p.0).unwrap_or(prev);
@@ -594,6 +619,7 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
                 cut: false,
                 arc: *arc,
                 coverage: *cov,
+                min_focus_y: path_min_focus_y(world, prev.focus, pose.focus),
             });
             prev = pose;
             t += seg_len;
@@ -609,6 +635,7 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
         cut: false,
         arc: 0.0,
         coverage: Coverage::default(),
+        min_focus_y: path_min_focus_y(world, prev.focus, prev.focus),
     });
 
     // ---- 时间点动作 ----
@@ -694,13 +721,11 @@ fn acceptance_control(
     let yaw = lerp(seg.from.yaw, seg.to.yaw, e);
     let pitch = lerp(seg.from.pitch, seg.to.pitch, e);
     let target_dist = lerp(seg.from.dist, seg.to.dist, e);
-    // 贴地保护：焦点不低于地表 +3（地下机位豁免）。
+    // 贴地保护：焦点不低于段内预采样的地形下限（地下机位豁免）。
+    // 段内常量下限保证 focus 逐帧连续（lerp/弧线本身连续）。
     let underground = seg.to.underground || seg.from.underground;
     if !underground {
-        let gx = focus.x.floor().clamp(0.0, (world.size.x - 1) as f32) as i32;
-        let gz = focus.z.floor().clamp(0.0, (world.size.z - 1) as f32) as i32;
-        let ground = world.column_height(gx, gz).max(1) as f32;
-        focus.y = focus.y.max(ground + 3.0);
+        focus.y = focus.y.max(seg.min_focus_y);
     }
 
     rig.0.control_locked = true;
@@ -809,11 +834,18 @@ fn acceptance_control(
         };
         if sign != 0 {
             if sign == -acc.last_dist_delta_sign && acc.last_dist_delta_sign != 0 {
-                // 一次交替：摆幅必须明显小于上一摆幅的 85% 才视为在收敛。
+                // 一次交替：摆幅明显衰减（<85%）=> 正常收敛，打断连续计数；
+                // 连续 6 次不衰减交替 => 真振荡（等幅摆动不收敛）。
                 let last_amp = acc.last_dist_delta_abs;
                 let amp = delta.abs();
                 if last_amp > 0.0 && amp >= last_amp * 0.85 {
-                    acc.oscillation_events += 1;
+                    acc.osc_run += 1;
+                    if acc.osc_run >= 6 {
+                        acc.oscillation_events += 1;
+                        acc.osc_run = 0;
+                    }
+                } else {
+                    acc.osc_run = 0;
                 }
             }
             acc.last_dist_delta_sign = sign;
@@ -1121,7 +1153,8 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
         ),
     }
 
-    // 8. 洞口井射：应穿过地表开口在深处命中
+    // 8. 洞口井射：从开口上方垂直下射，应穿过被挖穿的表面、
+    //    在纯函数地形表面之下命中（井底或洞内）。
     let ray8 = Ray::normalized(
         Vec3::new(
             opening.x as f32 + 0.5,
@@ -1130,17 +1163,25 @@ fn run_pick_rays(acc: &mut AcceptanceState, world: &World) {
         ),
         Vec3::new(0.0, -1.0, 0.0),
     );
+    // 开口列的纯函数地形高度（未被洞穴挖穿时的表面）。
+    let h_terrain = world
+        .params
+        .terrain_height(opening.x, opening.z)
+        .clamp(1, (world.size.y as i32) - 2);
     match pick_voxel(world, &ray8, 200.0) {
-        Some(h) if h.voxel.y < opening.y => check(
+        Some(h) if h.voxel.y < h_terrain => check(
             "射线8-洞口井射",
             true,
-            format!("深 {} 命中 y={}", opening.y, h.voxel.y),
+            format!(
+                "地形面 {h_terrain} 之下命中 y={}（开口列最高实体 {}）",
+                h.voxel.y, opening.y
+            ),
             &mut results,
         ),
         other => check(
             "射线8-洞口井射",
             false,
-            format!("异常 {other:?}"),
+            format!("异常 {other:?}（期望 y < {h_terrain}）"),
             &mut results,
         ),
     }

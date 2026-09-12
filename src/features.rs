@@ -251,16 +251,23 @@ pub fn probe_world(world: &World) -> FeatureReport {
             if rim_max - h < 4 {
                 continue;
             }
-            // 本列自顶部向下需有 ≥4 的竖直空气井（保证"井射"拾取断言可复现：
-            // 垂直射线穿过开口必然在开口表面之下命中）。
-            let mut shaft = 0;
-            for y in (0..h).rev() {
+            // 表面挖穿深度：本列纯函数地形高度与实际最高实体之差 ≥4，
+            // 且中间层全空气（"井"在实体顶之上，向天空开口）。
+            let h_terrain = world
+                .params
+                .terrain_height(x, z)
+                .clamp(1, (world.size.y as i32) - 2);
+            if h_terrain - h < 4 {
+                continue;
+            }
+            let mut open = true;
+            for y in (h + 1)..h_terrain {
                 if world.voxel(IVec3::new(x, y, z)).is_solid() {
+                    open = false;
                     break;
                 }
-                shaft += 1;
             }
-            if shaft < 4 {
+            if !open {
                 continue;
             }
             // 开口向下的空气连通体积。

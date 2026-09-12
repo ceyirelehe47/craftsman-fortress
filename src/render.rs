@@ -25,11 +25,20 @@ pub struct ChunkMeshEntity {
 #[derive(Resource, Default)]
 pub struct ChunkMeshes {
     pub entries: std::collections::HashMap<IVec3, (Entity, Handle<Mesh>)>,
+    /// 已完成网格化但结果为空（数据全空气、或非空但被邻居完全遮挡 => 0 面，
+    /// 无需绘制实体）的 Chunk 集合。供 visible-unready 诊断区分
+    /// "无需网格"与"缺网格"。
+    pub meshed_empty: std::collections::HashSet<IVec3>,
 }
 
 impl ChunkMeshes {
     pub fn meshed_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// 该 Chunk 的渲染准备是否完成（有实体，或确认无需实体）。
+    pub fn is_ready(&self, cc: IVec3) -> bool {
+        self.entries.contains_key(&cc) || self.meshed_empty.contains(&cc)
     }
 }
 
@@ -166,9 +175,12 @@ pub fn apply_chunk_mesh(
             commands.entity(entity).despawn();
             meshes.remove(&handle);
         }
+        // 记录"已网格化但结果为空"：0 面 chunk 无需实体，但准备状态算完成。
+        registry.meshed_empty.insert(cc);
         return;
     }
     let mesh = mesh_from_data(data);
+    registry.meshed_empty.remove(&cc);
     match registry.entries.get(&cc) {
         Some((_, handle)) => {
             // 句柄复用：原地替换资源内容，实体与句柄保持稳定。
