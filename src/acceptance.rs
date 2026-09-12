@@ -734,40 +734,11 @@ fn acceptance_control(
         focus.y = focus.y.max(seg.min_focus_y);
     }
 
-    rig.0.control_locked = true;
-    rig.0.focus = focus;
-    rig.0.yaw = yaw;
-    rig.0.pitch = pitch;
-    rig.0.target_dist = target_dist.max(1.5);
-    rig.0.clamp_all();
-    // 段切换 & cut：距离直接到位，避免跨段平滑拖尾穿过地形。
-    if seg_changed {
-        if seg.cut {
-            rig.0.dist = rig.0.target_dist;
-        }
-        if t >= T_CRUISE_START {
-            acc.coverage_hits.push(seg.coverage);
-        }
-    }
-
-    // ---------- 2. 动作 ----------
-    while let Some((at, _)) = acc.actions.front() {
-        if *at > t {
-            break;
-        }
-        let (_, action) = acc.actions.pop_front().unwrap();
-        run_action(
-            &mut acc,
-            &mut diag,
-            &mut tint,
-            &mut scripted_ray,
-            world,
-            action,
-            t,
-        );
-    }
-
-    // ---------- 3. 不变量采样（t >= 热身结束）----------
+    // ---------- 2. 不变量采样（t >= 热身结束）----------
+    // 必须在"位姿应用"之前采样：此时 rig 是本帧求解后的完整状态
+    // （位姿 N-1 + 针对该位姿的碰撞钳制距离），眼位即真实渲染相机位置。
+    // 若先应用位姿 N 再采样，会读到"新位姿 + 旧距离"的瞬态错位
+    // （run5 残留 6 帧入实体事件的根因）。
     if t >= T_WARMUP_END && !acc.finalized {
         let eye = rig.0.eye();
         // 有限性
@@ -882,7 +853,41 @@ fn acceptance_control(
         }
     }
 
-    // ---------- 4. Finalize（阻塞完成全部判定与证据输出）----------
+    // ---------- 3. 位姿应用 ----------
+    rig.0.control_locked = true;
+    rig.0.focus = focus;
+    rig.0.yaw = yaw;
+    rig.0.pitch = pitch;
+    rig.0.target_dist = target_dist.max(1.5);
+    rig.0.clamp_all();
+    // 段切换 & cut：距离直接到位，避免跨段平滑拖尾穿过地形。
+    if seg_changed {
+        if seg.cut {
+            rig.0.dist = rig.0.target_dist;
+        }
+        if t >= T_CRUISE_START {
+            acc.coverage_hits.push(seg.coverage);
+        }
+    }
+
+    // ---------- 4. 动作 ----------
+    while let Some((at, _)) = acc.actions.front() {
+        if *at > t {
+            break;
+        }
+        let (_, action) = acc.actions.pop_front().unwrap();
+        run_action(
+            &mut acc,
+            &mut diag,
+            &mut tint,
+            &mut scripted_ray,
+            world,
+            action,
+            t,
+        );
+    }
+
+    // ---------- 5. Finalize（阻塞完成全部判定与证据输出）----------
     if t >= T_FINALIZE && !acc.finalized {
         acc.finalized = true;
         finalize(
