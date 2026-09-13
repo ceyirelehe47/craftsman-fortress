@@ -4,9 +4,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# 显式白名单：允许出现禁用词的文件（历史决策记录，原文可考）。
+# 显式白名单：允许出现禁用词的文件。
+# - docs/DECISIONS.md：历史决策记录（原文可考）；
+# - 本脚本自身：禁用词定义行是功能性构造，不属当前语境使用。
 WHITELIST=(
   "docs/DECISIONS.md"
+  "scripts/check_naming.sh"
 )
 
 # 禁用词：正式名称统一为"工匠要塞"；历史占位命名与需求文档版本引用
