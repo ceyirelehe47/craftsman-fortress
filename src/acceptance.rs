@@ -45,10 +45,14 @@ const T_FINALIZE: f64 = 628.0;
 const GIF_INTERVAL: f64 = 4.0;
 /// GIF 帧尺寸。
 const GIF_SIZE: (u32, u32) = (480, 270);
-/// 帧间期望眼位最大位移（米/帧），"跳变"的工程定义是位姿不连续。
-/// 与帧率无关：脚本平滑运动峰值 ~1 m/帧（240 fps 下 223 m/s 的过渡峰值），
-/// 真跳变/状态错乱是数十米级瞬移；4 m/帧 之间留一个数量级余量。
-const MAX_EYE_STEP: f32 = 4.0;
+/// 帧间期望眼位速度上限（米/秒），"跳变"的工程定义是控制信号不连续。
+/// 时间线的合法运动峰值：rotate_360 段（yaw TAU/8s，smoothstep 峰值角速度
+/// 1.18 rad/s × 切向半径 62.8m）+ 过渡弧竖直分量 ≈ 80 m/s；脚本瞬移/状态
+/// 错乱是单帧数十米级（dt≤0.1s 时 >300 m/s）。150 m/s 两侧各留约一倍余量。
+/// 用速度而非位移：位移 = 速度 × 帧间隔，帧间隔毛刺（0.05-0.1s 调度停顿）
+/// 会把 4 m/帧 的位移阈值在合法峰值速度下击穿（Reviewer 轮实测 4.2m@76ms）。
+/// 帧间隔 >0.1s 的样本仍整体豁免（见采样处，数据不可信）。
+const MAX_EYE_SPEED: f32 = 150.0;
 /// A07：停止 Mesh 修改后，队列必须保持连续静默的时长（秒）。
 const QUEUE_QUIET_SECONDS: f64 = 5.0;
 /// A07 判定要求观察到的"Mesh 修改波次"下限（TintOn/TintOff/编辑测试各一波）。
@@ -1128,16 +1132,17 @@ fn acceptance_control(
         if diag.visible_unready > 0 {
             acc.unready_violation_frames += 1;
         }
-        // 跳变（无跳变）：基于期望眼位（目标距离版）的帧间位移——控制流连续性断言。
+        // 跳变（无跳变）：基于期望眼位（目标距离版）的帧间速度——控制流连续性断言。
         // 碰撞收缩是安全机制，其眼位速度由几何需要决定，不属"控制跳变"。
-        // 用位移而非速度：速度阈值会随帧率缩放（240 fps 下平滑运动的
-        // smoothstep 峰值即超 200 m/s），位移阈值帧率无关。
+        // 速度判据：位移 = 速度 × 帧间隔，固定位移阈值会被"合法峰值速度 ×
+        // 帧间隔毛刺"击穿（rotate_360 段 80 m/s × 76ms = 4.2m > 4m/帧）；
+        // 阈值 MAX_EYE_SPEED=150 m/s 高于合法峰值（~80）约一倍、低于真瞬移
+        //（dt≤0.1s 时 >300）约一倍，两侧区分度明确。
         // 断言对象是"本帧将要应用的位姿"（控制信号）与上帧位姿的差：
         // 段切换/瞬移恰好出现在 seg_changed 帧，豁免配对才正确
         // （若用 rig 上帧位姿，跳变样本会滞后一帧、逃出豁免——run6 教训）。
-        // 帧间隔毛刺守卫：帧间隔 >0.1s 时位移 = 真实速度 × 毛刺时长
-        //（旋转峰值 ~55 m/s × 0.23s ≈ 12.9 m 即此类），不代表控制不连续，
-        // 跳过该次比较——这是测量有效性守卫，不是场景豁免。
+        // 帧间隔毛刺守卫：帧间隔 >0.1s 的样本整体跳过——过长间隔下速度
+        // 读数不可信（测量有效性守卫，不是场景豁免）。
         let mut ctrl = rig.0.clone();
         ctrl.focus = focus;
         ctrl.yaw = yaw;
@@ -1148,13 +1153,13 @@ fn acceptance_control(
         if let Some((last_t, last)) = acc.last_eye {
             let dt_sample = t - last_t;
             if t >= T_CRUISE_START && !seg_changed && dt_sample > 0.0 && dt_sample <= 0.1 {
-                let step = (target_eye - last).length();
-                if step > MAX_EYE_STEP {
+                let speed = (target_eye - last).length() / dt_sample as f32;
+                if speed > MAX_EYE_SPEED {
                     acc.speed_violations += 1;
                     // 限流样本日志（前 3 次），便于证据复核。
                     if acc.speed_violations <= 3 {
                         info!(
-                            "[验收/A06] 跳变样本: t={t:.2} step={step:.1}m eye=({:.1},{:.1},{:.1}) last=({:.1},{:.1},{:.1})",
+                            "[验收/A06] 跳变样本: t={t:.2} speed={speed:.0}m/s eye=({:.1},{:.1},{:.1}) last=({:.1},{:.1},{:.1})",
                             target_eye.x, target_eye.y, target_eye.z, last.x, last.y, last.z
                         );
                     }
