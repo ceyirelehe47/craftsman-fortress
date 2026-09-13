@@ -7,8 +7,8 @@
 //!   `y >= H` 与水平越界视为空气（地图边缘呈剖面状可见）。
 
 use crate::chunk::ChunkData;
-use crate::coords::{chunk_of_voxel, local_of_voxel, WorldSize, CHUNK_SIZE};
-use crate::generation::{generate_chunk, TerrainParams};
+use crate::coords::{chunk_of_voxel, local_of_voxel, WorldSize, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::generation::{generate_chunk, generated_block_at, TerrainParams};
 use crate::noise::mix64;
 use crate::voxel::BlockId;
 use bevy::math::IVec3;
@@ -21,6 +21,29 @@ pub struct ChunkSlot {
     pub generated: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditReject {
+    OutOfBounds(IVec3),
+    ChunkNotLoaded(IVec3),
+    ProtectedBedrock(IVec3),
+    ReservedTopLayer(IVec3),
+    BedrockPlacement(IVec3),
+}
+
+impl std::fmt::Display for EditReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditReject::OutOfBounds(v) => write!(f, "out of bounds: {v}"),
+            EditReject::ChunkNotLoaded(v) => write!(f, "chunk not loaded: {v}"),
+            EditReject::ProtectedBedrock(v) => write!(f, "protected bedrock: {v}"),
+            EditReject::ReservedTopLayer(v) => write!(f, "top safety layer must stay air: {v}"),
+            EditReject::BedrockPlacement(v) => write!(f, "Bedrock cannot be placed: {v}"),
+        }
+    }
+}
+
+impl std::error::Error for EditReject {}
+
 /// 世界权威对象。非 ECS Resource 驻留（数据原则：Chunk 数据与 ECS 独立对象分离）。
 pub struct World {
     pub size: WorldSize,
@@ -31,6 +54,8 @@ pub struct World {
     dirty: HashMap<IVec3, ()>,
     /// 已生成 Chunk 计数。
     generated_count: usize,
+    /// 相对确定性 Seed 世界的最小修改覆盖层。
+    modifications: HashMap<IVec3, BlockId>,
 }
 
 impl World {
@@ -45,6 +70,7 @@ impl World {
             chunks: Vec::with_capacity(total),
             dirty: HashMap::default(),
             generated_count: 0,
+            modifications: HashMap::default(),
         };
         // 槽位线性排布：index = cx + cz*Wx + cy*Wx*Wz，按 (cy, cz, cx) 嵌套顺序生成。
         for cy in 0..n.y as i32 {
@@ -78,6 +104,7 @@ impl World {
                 .collect(),
             dirty: HashMap::default(),
             generated_count: 0,
+            modifications: HashMap::default(),
         }
     }
 
@@ -140,9 +167,19 @@ impl World {
         slot.data.get(local)
     }
 
-    /// 单体素修改：写入并标记受影响 Chunk（含边界邻居）为脏。
+    /// 单体素修改：写入、维护修改覆盖层，并标记受影响 Chunk（含边界邻居）为脏。
     /// 返回旧值；越界或未生成返回 None。
     pub fn set_voxel(&mut self, v: IVec3, block: BlockId) -> Option<BlockId> {
+        self.write_voxel(v, block, true, true)
+    }
+
+    fn write_voxel(
+        &mut self,
+        v: IVec3,
+        block: BlockId,
+        mark_dirty: bool,
+        track_modification: bool,
+    ) -> Option<BlockId> {
         if !self.size.contains(v) {
             return None;
         }
@@ -161,7 +198,22 @@ impl World {
             slot.data.set(local, block);
             old
         };
-        // 标记本 Chunk 与（当体素位于 Chunk 边界时）相邻 Chunk。
+
+        if track_modification {
+            let generated = generated_block_at(&self.params, v, self.size.y);
+            if block == generated {
+                self.modifications.remove(&v);
+            } else {
+                self.modifications.insert(v, block);
+            }
+        }
+        if mark_dirty {
+            self.mark_voxel_dirty(cc, local);
+        }
+        Some(old)
+    }
+
+    fn mark_voxel_dirty(&mut self, cc: IVec3, local: bevy::math::UVec3) {
         self.dirty.insert(cc, ());
         if local.x == 0 {
             self.dirty.insert(cc + IVec3::new(-1, 0, 0), ());
@@ -181,9 +233,96 @@ impl World {
         if local.z == CHUNK_SIZE as u32 - 1 {
             self.dirty.insert(cc + IVec3::new(0, 0, 1), ());
         }
-        // 只保留有效范围内的 Chunk（越界邻居忽略）。
         self.dirty.retain(|k, _| self.size.contains_chunk(*k));
-        Some(old)
+    }
+
+    /// 玩家可见的编辑规则：基岩不可修改、不可放置 Bedrock、H-1 保持为空气安全层。
+    pub fn try_user_edit(&mut self, v: IVec3, block: BlockId) -> Result<bool, EditReject> {
+        if !self.size.contains(v) {
+            return Err(EditReject::OutOfBounds(v));
+        }
+        let old = self.voxel(v);
+        if old == block {
+            return Ok(false);
+        }
+        if old == BlockId::Bedrock || v.y <= self.params.bedrock_layers {
+            return Err(EditReject::ProtectedBedrock(v));
+        }
+        if block == BlockId::Bedrock {
+            return Err(EditReject::BedrockPlacement(v));
+        }
+        if v.y as u32 == self.size.y - 1 && block.is_solid() {
+            return Err(EditReject::ReservedTopLayer(v));
+        }
+        self.set_voxel(v, block)
+            .map(|previous| previous != block)
+            .ok_or(EditReject::ChunkNotLoaded(v))
+    }
+
+    pub fn modification_count(&self) -> usize {
+        self.modifications.len()
+    }
+
+    pub fn modifications_sorted(&self) -> Vec<(IVec3, BlockId)> {
+        let mut edits: Vec<_> = self.modifications.iter().map(|(v, b)| (*v, *b)).collect();
+        edits.sort_by_key(|(v, _)| (v.x, v.y, v.z));
+        edits
+    }
+
+    /// 已生成世界的语义哈希：按固定 Chunk/体素顺序混合解码后的 BlockId，
+    /// 与 palette 插入顺序无关，适合作为存档前后状态一致性的证据。
+    pub fn semantic_hash(&self) -> u64 {
+        let mut h = mix64(
+            self.params.seed
+                ^ (self.size.x as u64) << 32
+                ^ self.size.y as u64
+                ^ (self.size.z as u64) << 48
+                ^ 0x5345_4D41_4E54_4943,
+        );
+        for cy in 0..self.size.chunks().y as i32 {
+            for cz in 0..self.size.chunks().z as i32 {
+                for cx in 0..self.size.chunks().x as i32 {
+                    let slot = self.chunk(IVec3::new(cx, cy, cz)).unwrap();
+                    for index in 0..CHUNK_VOLUME {
+                        h = mix64(h ^ slot.data.get_index(index) as u64);
+                    }
+                }
+            }
+        }
+        h
+    }
+
+    /// 不依赖当前修改覆盖层，重新按纯函数生成基础 Chunk 并计算语义哈希。
+    pub fn generated_semantic_hash(&self) -> u64 {
+        let mut h = mix64(
+            self.params.seed
+                ^ (self.size.x as u64) << 32
+                ^ self.size.y as u64
+                ^ (self.size.z as u64) << 48
+                ^ 0x5345_4D41_4E54_4943,
+        );
+        for cy in 0..self.size.chunks().y as i32 {
+            for cz in 0..self.size.chunks().z as i32 {
+                for cx in 0..self.size.chunks().x as i32 {
+                    let data = generate_chunk(&self.params, IVec3::new(cx, cy, cz), self.size.y);
+                    for index in 0..CHUNK_VOLUME {
+                        h = mix64(h ^ data.get_index(index) as u64);
+                    }
+                }
+            }
+        }
+        h
+    }
+
+    /// 在已完整生成的世界上安装存档覆盖层；加载阶段不制造脏 Mesh 队列。
+    pub fn apply_persisted_edits(&mut self, edits: &[(IVec3, BlockId)]) -> Result<(), String> {
+        self.modifications.clear();
+        for &(v, block) in edits {
+            self.write_voxel(v, block, false, true)
+                .ok_or_else(|| format!("cannot apply persisted edit at {v}"))?;
+        }
+        self.dirty.clear();
+        Ok(())
     }
 
     /// 待重建 Chunk 队列快照。
@@ -258,11 +397,16 @@ impl World {
         }
         self.generated_count = self.chunks.len();
         self.dirty.clear();
+        self.modifications.clear();
+    }
+
+    pub fn clear_all_dirty(&mut self) {
+        self.dirty.clear();
     }
 
     /// 测试辅助：清空脏集合。
     pub fn clear_all_dirty_for_test(&mut self) {
-        self.dirty.clear();
+        self.clear_all_dirty();
     }
 }
 
@@ -369,6 +513,54 @@ mod tests {
             None,
             "未生成 chunk 不可写"
         );
+    }
+
+    #[test]
+    fn edit_overlay_normalizes_back_to_generated_value() {
+        let size = WorldSize::new(32, 32, 32);
+        let mut world = World::generate_all(size, TerrainParams::new(17));
+        let voxel = IVec3::new(8, 12, 8);
+        let generated = generated_block_at(&world.params, voxel, world.size.y);
+        let changed = if generated.is_solid() {
+            BlockId::Air
+        } else {
+            BlockId::Stone
+        };
+        world.set_voxel(voxel, changed).unwrap();
+        assert_eq!(world.modification_count(), 1);
+        world.set_voxel(voxel, generated).unwrap();
+        assert_eq!(world.modification_count(), 0);
+    }
+
+    #[test]
+    fn user_edit_rules_protect_bedrock_and_top_air() {
+        let size = WorldSize::new(32, 32, 32);
+        let mut world = World::generate_all(size, TerrainParams::new(17));
+        assert!(world
+            .try_user_edit(IVec3::new(4, 0, 4), BlockId::Air)
+            .is_err());
+        assert!(world
+            .try_user_edit(IVec3::new(4, 31, 4), BlockId::Stone)
+            .is_err());
+    }
+
+    #[test]
+    fn semantic_hash_ignores_palette_edit_order() {
+        let size = WorldSize::new(32, 32, 32);
+        let params = TerrainParams::new(17);
+        let mut a = World::generate_all(size, params.clone());
+        let mut b = World::generate_all(size, params);
+        let edits = [
+            (IVec3::new(8, 12, 8), BlockId::Air),
+            (IVec3::new(9, 12, 8), BlockId::Stone),
+        ];
+        for &(v, block) in &edits {
+            a.set_voxel(v, block).unwrap();
+        }
+        for &(v, block) in edits.iter().rev() {
+            b.set_voxel(v, block).unwrap();
+        }
+        assert_eq!(a.semantic_hash(), b.semantic_hash());
     }
 
     #[test]

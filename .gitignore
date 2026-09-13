@@ -4,3 +4,8 @@ evidence_*/
 *.log
 
 evidence_*.zip
+
+saves/
+*.cfsv.slot0
+*.cfsv.slot1
+*.cfsv.slot?.tmp-*

@@ -11,8 +11,10 @@ generation.rs   纯函数：高度场(大陆/丘陵/山脊台地/河谷) + 3D �
    ↓
 chunk.rs        ChunkData：palette(去重方块表) + 1 字节/体素紧凑索引（存储方向约束）
    ↓
-world.rs        World：全部 Chunk 的单一权威持有者（非 ECS Entity，驻留于 Resource）
-                voxel() 统一查询 / set_voxel() 单体素修改 + 边界双侧标脏 / world_hash()
+world.rs        World：全部 Chunk 的单一权威持有者 + 相对 Seed 的修改覆盖层
+                voxel() / set_voxel() / semantic_hash() / 跨边界标脏
+   ↓
+persistence.rs  CFSAVE02 双槽存档：覆盖层编码、校验、损坏回退、精确重建
    ↓
 meshing.rs      纯函数：面剔除 Chunk 网格（跨界邻居经 World 权威查询，跨界无内面/无裂缝）
    ↓
@@ -33,6 +35,8 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 | `camera.rs` | 焦点轨道相机；普通交互焦点采用小步 DDA sweep + 按轴滑动，眼位采用碰撞收缩 + 一阶平滑 |
 | `picking.rs` | Amanatides & Woo DDA 拾取；脚本射线与鼠标射线共用；gizmos 高亮 |
 | `diagnostics.rs` | 20 TPS 固定步计数、HUD、CSV 指标、RSS 采样、visible-unready 诊断 |
+| `editing.rs` | Delete/B 体素编辑、F5 保存与存档状态 HUD |
+| `persistence.rs` | 修改覆盖层双槽编码、校验、加载与损坏回退 |
 | `features.rs` | 验收世界八类地形特征自动探测（纯数据，供测试与验收共享） |
 | `acceptance.rs` | `--acceptance` 模式控制器：时间线巡航、截图、编辑/拾取测试、A01-A13 自动判定 |
 
@@ -42,6 +46,9 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 - **加载策略**：CPU 世界数据全常驻（2048 chunks 约 34 MiB 原始体素），加载期每帧 10 ms 预算分片
   生成 + 网格化，完成后切 `Ready`；因此正式巡航中 visible-unready 恒为 0（A07）。
 - **边界重建**：`set_voxel` 在体素贴 Chunk 边时同时标脏本块与邻居块；渲染层每帧消费脏队列。
+- **修改覆盖层**：`World` 只记录与 `generated_block_at` 不同的最终值；恢复 Seed 原值时记录自动删除。
+- **存档一致性**：存档使用与 palette 顺序无关的语义哈希。加载先验证基础世界哈希，再应用覆盖层并验证最终世界哈希。
+- **崩溃恢复**：逻辑存档路径轮换两个不可原地覆盖的槽位；加载选择 generation 最大的有效槽。
 - **焦点运动**：大位移拆为小于半格的子步；每个子步先对完整路径做 DDA sweep，受阻后按轴尝试滑动，防止低帧率/高速输入穿过一格厚实体。
 - **垂直边界**：焦点允许使用世界最顶层空气体素（`y < H`），因此 `H-2` 的最高实体列可恢复到 `H-1` 空气层。
 - **眼位约束**：从焦点向相机方向 DDA，命中实体则收缩轨道距离；`dist` 一阶指数平滑收敛。
@@ -67,3 +74,7 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 独立 Reviewer 干净重跑（A14）。
 
 封版时区分代码验收提交 `S` 与后置报告提交 `R`：两套原始证据和不可移动标签都指向 `S`；`R` 只补充 `docs/REVIEW.md`，不能改变证据目标。`scripts/publish_r1_1_release.sh` 与 `scripts/verify_r1_1_release.sh` 负责检查这一关系。
+
+## R2 验收流水线
+
+`scripts/r2_acceptance.sh` 先调用 R1 图形验收，随后运行 `examples/r2_roundtrip.rs` 的存档往返、损坏回退与槽位修复。最终通过条件是聚合 `report.json` 中 R1 与 R2 均为 PASS，并由隔离 Reviewer 从另一全新克隆重跑。

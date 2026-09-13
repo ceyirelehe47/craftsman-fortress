@@ -32,16 +32,21 @@ impl BlockId {
     ];
 
     #[inline]
-    pub fn from_u8(v: u8) -> BlockId {
+    pub fn try_from_u8(v: u8) -> Option<BlockId> {
         match v {
-            0 => BlockId::Air,
-            1 => BlockId::Grass,
-            2 => BlockId::Dirt,
-            3 => BlockId::Stone,
-            4 => BlockId::Bedrock,
-            5 => BlockId::Sand,
-            other => panic!("未知方块 id: {other}"),
+            0 => Some(BlockId::Air),
+            1 => Some(BlockId::Grass),
+            2 => Some(BlockId::Dirt),
+            3 => Some(BlockId::Stone),
+            4 => Some(BlockId::Bedrock),
+            5 => Some(BlockId::Sand),
+            _ => None,
         }
+    }
+
+    #[inline]
+    pub fn from_u8(v: u8) -> BlockId {
+        Self::try_from_u8(v).unwrap_or_else(|| panic!("未知方块 id: {v}"))
     }
 
     /// 是否为实体（参与遮挡与拾取）。
@@ -147,8 +152,10 @@ mod tests {
     #[test]
     fn block_id_roundtrip() {
         for b in BlockId::ALL {
+            assert_eq!(BlockId::try_from_u8(b as u8), Some(b));
             assert_eq!(BlockId::from_u8(b as u8), b);
         }
+        assert_eq!(BlockId::try_from_u8(255), None);
         assert!(!BlockId::Air.is_solid());
         assert!(BlockId::Bedrock.is_solid());
     }

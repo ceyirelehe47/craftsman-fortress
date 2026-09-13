@@ -207,6 +207,30 @@ impl TerrainParams {
     }
 }
 
+/// 返回确定性生成世界在单个坐标上的基础方块。
+/// R2 修改覆盖层用它判断某项编辑是否已恢复为 Seed 世界原值。
+pub fn generated_block_at(params: &TerrainParams, voxel: IVec3, world_y: u32) -> BlockId {
+    if voxel.y < 0 || voxel.y >= world_y as i32 {
+        return BlockId::Air;
+    }
+    let height = params
+        .terrain_height(voxel.x, voxel.z)
+        .clamp(1, world_y as i32 - 2);
+    if voxel.y > height {
+        BlockId::Air
+    } else if voxel.y <= params.bedrock_layers {
+        BlockId::Bedrock
+    } else if params.carve_cave(voxel.x, voxel.y, voxel.z) {
+        BlockId::Air
+    } else if voxel.y == height {
+        params.surface_block(height)
+    } else if voxel.y >= height - 3 {
+        BlockId::Dirt
+    } else {
+        BlockId::Stone
+    }
+}
+
 /// 生成单个 Chunk（纯函数：只依赖参数与 Chunk 坐标）。
 pub fn generate_chunk(params: &TerrainParams, cc: IVec3, world_y: u32) -> ChunkData {
     let origin = chunk_origin(cc);
@@ -356,5 +380,24 @@ mod tests {
             .filter(|&&i| top.palette()[i as usize] != BlockId::Air)
             .count();
         assert_eq!(solid, 0, "顶层 Chunk 应为空气");
+    }
+
+    #[test]
+    fn point_generation_matches_chunk_generation() {
+        let params = TerrainParams::new(12345);
+        for voxel in [
+            IVec3::new(0, 0, 0),
+            IVec3::new(15, 18, 15),
+            IVec3::new(16, 18, 16),
+            IVec3::new(31, 40, 7),
+        ] {
+            let cc = crate::coords::chunk_of_voxel(voxel);
+            let chunk = generate_chunk(&params, cc, 64);
+            assert_eq!(
+                generated_block_at(&params, voxel, 64),
+                chunk.get(local_of_voxel(voxel)),
+                "point/chunk mismatch at {voxel}"
+            );
+        }
     }
 }
