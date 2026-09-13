@@ -25,8 +25,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EVIDENCE_DIR="${1:-evidence_$(date +%Y%m%d_%H%M%S)}"
-# 总超时（秒）：默认 900s，明显大于正常 10-11 分钟巡航，可用环境变量覆盖。
-WATCHDOG_SEC="${ACCEPTANCE_WATCHDOG_SEC:-900}"
+# 应用阶段总超时（秒）：默认 1200s；前置编译时间不计入，可用环境变量覆盖。
+WATCHDOG_SEC="${ACCEPTANCE_WATCHDOG_SEC:-1200}"
 
 now_s() { date +%s; }
 T_START=$(now_s)

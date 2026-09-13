@@ -40,14 +40,19 @@ cargo run --release            # 进入验证世界（交互模式）
 | Chunk 边界调试着色 | `F3` |
 | 调试截图（全分辨率 PNG 至工作目录） | `F12` |
 
-限制：俯仰 12°..87°，轨道距离 6..150 m，焦点限制在世界边界内；相机不会停留在实体体素内（碰撞收缩允许距离临时收缩至 0（眼位退到焦点）+ 一阶平滑）。
+限制：俯仰 12°..87°，轨道距离 6..150 m，焦点限制在世界边界内；普通交互焦点移动会拆成小于半个体素的子步，并对每段执行 DDA 连续扫描，完整方向受阻时按轴滑动，避免低帧率或 Shift 加速时穿过薄墙。相机眼位继续使用碰撞收缩（实际距离可临时收缩至 0）和一阶平滑。
 
 ## 自动验收（单一入口）
 
 ```bash
-bash scripts/acceptance.sh          # 完整验收，约 12-15 分钟
-bash scripts/acceptance.sh my_dir   # 指定证据目录
+bash scripts/acceptance.sh          # 暖缓存通常约 12-15 分钟
+bash scripts/acceptance.sh my_dir   # 指定全新的证据目录
+
+# 较慢机器可覆盖“应用阶段”的 watchdog；不包含前置编译时间
+ACCEPTANCE_WATCHDOG_SEC=1500 bash scripts/acceptance.sh my_dir
 ```
+
+完整干净克隆还包含首次编译，实际总耗时可能显著高于暖缓存运行。应用阶段 watchdog 默认 1200 秒。
 
 一次调用依次完成：
 `cargo fmt --check` → `clippy -D warnings` → 依赖版本审计（bevy 全家必须 0.19.x）→ 旧名称扫描 → `cargo test --release` → Release 构建 → `--acceptance` 模式运行（8 个固定机位截图、120 s 指标巡航、单体素编辑重建、拾取断言、低空普通控制路径（横穿山体/悬崖/边界，无脚本贴地保护）、双帧率阶段 TPS 验证、10 分钟耐久、GIF 录像）。
@@ -79,5 +84,5 @@ evidence_*/     验收证据包（运行时生成，不入库）
 ## 测试
 
 ```bash
-cargo test --release    # 42 项：确定性、坐标转换、边界、Mesh、拾取、固定步、特征回归
+cargo test --release    # 全量：确定性、坐标转换、边界、Mesh、拾取、相机安全、固定步与特征回归
 ```

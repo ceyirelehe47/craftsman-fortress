@@ -30,6 +30,8 @@ pub const DIST_MAX: f32 = 150.0;
 pub const COLLISION_MARGIN: f32 = 0.5;
 /// 焦点被抬出实体后与实体顶面的间隙（米）。
 pub const FOCUS_SURFACE_MARGIN: f32 = 0.3;
+/// 普通交互焦点一次连续扫描的最大子步（米）。小于半格，避免高速输入穿过薄墙。
+pub const FOCUS_SWEEP_MAX_STEP: f32 = 0.45;
 /// 平滑系数（1/s）：越大收敛越快。一阶滤波不会振荡。
 const DIST_SMOOTHING: f32 = 14.0;
 
@@ -74,7 +76,8 @@ impl CameraRig {
             target_dist: dist.clamp(DIST_MIN, DIST_MAX),
             dist: dist.clamp(DIST_MIN, DIST_MAX),
             bounds: (8.0, world_size.0 - 8.0, 8.0, world_size.2 - 8.0),
-            max_focus_y: world_size.1 - 2.0,
+            // 焦点必须保持在世界内，但要允许使用最顶层空气体素 H-1。
+            max_focus_y: (world_size.1 - 0.001).max(2.0),
             control_locked: false,
             last_clamped: dist.clamp(DIST_MIN, DIST_MAX),
         }
@@ -143,10 +146,10 @@ impl CameraRig {
         while v.y < world.size.y as i32 && world.voxel(v).is_solid() {
             v.y += 1;
         }
-        // v.y 现在是实体柱上方的第一个空气格（整列实体时等于 size.y，
-        // 由 clamp_all 钳回 max_focus_y 兜底）。
+        // 生成世界保证最高实体不超过 H-2，因此 v.y 可落在 H-1 顶层空气格。
         self.focus.y = (v.y as f32 + FOCUS_SURFACE_MARGIN).min(self.max_focus_y);
-        debug_assert!(!self.focus_is_solid(world) || v.y >= world.size.y as i32);
+        self.clamp_all();
+        debug_assert!(!self.focus_is_solid(world), "焦点恢复后仍位于实体内");
         true
     }
 
@@ -177,36 +180,75 @@ impl CameraRig {
     }
 }
 
-/// 应用普通交互焦点位移（键鼠平移/升降/拖动与普通交互探针共用的唯一入口）。
-/// 完整候选若进入实体，则尝试按轴滑动（保留单轴候选）；仍不安全时回退
-/// 旧焦点；历史状态已经非法时再向上确定性恢复。
-/// 返回 true 表示本次移动被阻挡或修正。
-pub fn apply_interactive_focus_delta(rig: &mut CameraRig, world: &World, delta: Vec3) -> bool {
-    if delta.length_squared() <= f32::EPSILON {
-        return rig.recover_focus_to_air(world);
+fn clamped_focus_candidate(rig: &CameraRig, focus: Vec3) -> Vec3 {
+    let mut candidate = rig.clone();
+    candidate.focus = focus;
+    candidate.clamp_all();
+    candidate.focus
+}
+
+/// 点焦点从 `from` 到 `to` 的整段路径是否没有进入实体体素。
+fn focus_path_is_clear(world: &World, from: Vec3, to: Vec3) -> bool {
+    let delta = to - from;
+    let distance = delta.length();
+    if distance <= f32::EPSILON {
+        return true;
     }
-    let previous = rig.focus;
-    rig.focus += delta;
-    rig.clamp_all();
-    if !rig.focus_is_solid(world) {
+    let end = IVec3::new(
+        to.x.floor() as i32,
+        to.y.floor() as i32,
+        to.z.floor() as i32,
+    );
+    if world.size.contains(end) && world.voxel(end).is_solid() {
         return false;
     }
-    let candidate = rig.focus;
-    let attempts = [
-        Vec3::new(candidate.x, previous.y, previous.z),
-        Vec3::new(previous.x, candidate.y, previous.z),
-        Vec3::new(previous.x, previous.y, candidate.z),
-        previous,
-    ];
-    for focus in attempts {
-        rig.focus = focus;
-        rig.clamp_all();
-        if !rig.focus_is_solid(world) {
-            return true;
-        }
+    let ray = Ray::normalized(from, delta);
+    pick_voxel(world, &ray, distance + 1e-4).is_none()
+}
+
+/// 应用普通交互焦点位移（键鼠平移/升降/拖动与普通交互探针共用的唯一入口）。
+/// 大位移拆成小于半格的子步；每个子步检查完整路径，受阻后按轴滑动。
+/// 历史状态已经非法时先向上确定性恢复。
+/// 返回 true 表示本次移动被阻挡或修正。
+pub fn apply_interactive_focus_delta(rig: &mut CameraRig, world: &World, delta: Vec3) -> bool {
+    let mut corrected = rig.recover_focus_to_air(world);
+    if delta.length_squared() <= f32::EPSILON {
+        return corrected;
     }
-    rig.recover_focus_to_air(world);
-    true
+
+    let steps = (delta.length() / FOCUS_SWEEP_MAX_STEP).ceil().max(1.0) as usize;
+    let step = delta / steps as f32;
+    for _ in 0..steps {
+        let previous = rig.focus;
+        let full = clamped_focus_candidate(rig, previous + step);
+        if focus_path_is_clear(world, previous, full) {
+            rig.focus = full;
+            continue;
+        }
+
+        corrected = true;
+        let mut current = previous;
+        // 水平分量优先，保持贴墙滑动；垂直分量最后处理。
+        for axis_delta in [
+            Vec3::new(step.x, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, step.z),
+            Vec3::new(0.0, step.y, 0.0),
+        ] {
+            if axis_delta.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            let target = clamped_focus_candidate(rig, current + axis_delta);
+            if focus_path_is_clear(world, current, target) {
+                current = target;
+            }
+        }
+        rig.focus = current;
+    }
+
+    if rig.focus_is_solid(world) {
+        corrected |= rig.recover_focus_to_air(world);
+    }
+    corrected
 }
 
 /// 相机控制：读取键鼠输入更新 rig（仅 Ready 且未锁定）。
@@ -651,5 +693,79 @@ mod tests {
             !world.size.contains(ev) || !world.voxel(ev).is_solid(),
             "收缩后眼位 {ev:?} 不得在实体内"
         );
+    }
+
+    /// 最大缩放 + Shift + dt=0.1s 可产生 40.5m 单帧意图位移；连续扫描不得让焦点
+    /// 从一格厚墙体的一侧直接落到另一侧空气格。
+    #[test]
+    fn high_speed_interactive_move_cannot_tunnel_through_thin_wall() {
+        let mut solid = Vec::new();
+        for y in 0..20 {
+            for z in 0..64 {
+                solid.push(IVec3::new(20, y, z));
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(5.5, 6.5, 10.5),
+            0.0,
+            PITCH_MIN,
+            DIST_MAX,
+        );
+        let corrected = apply_interactive_focus_delta(&mut rig, &world, Vec3::new(40.5, 0.0, 0.0));
+        assert!(corrected, "高速撞墙必须报告阻挡/修正");
+        assert!(rig.focus.x < 20.0, "焦点不得穿到墙后，实际 {:?}", rig.focus);
+        assert!(
+            rig.focus.x > 18.0,
+            "应推进到墙前而非整段冻结，实际 {:?}",
+            rig.focus
+        );
+        assert!(!rig.focus_is_solid(&world));
+    }
+
+    /// 高速斜向位移遇到薄墙时保留切向位移，形成滑动而不是穿墙或完全锁死。
+    #[test]
+    fn high_speed_diagonal_move_slides_along_thin_wall() {
+        let mut solid = Vec::new();
+        for y in 0..20 {
+            for z in 8..32 {
+                solid.push(IVec3::new(20, y, z));
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(5.5, 6.5, 10.5),
+            0.0,
+            PITCH_MIN,
+            DIST_MAX,
+        );
+        let corrected = apply_interactive_focus_delta(&mut rig, &world, Vec3::new(40.5, 0.0, 8.0));
+        assert!(corrected);
+        assert!(rig.focus.x < 20.0, "法向分量不得穿墙: {:?}", rig.focus);
+        assert!(rig.focus.z > 15.0, "切向分量应继续滑动: {:?}", rig.focus);
+        assert!(!rig.focus_is_solid(&world));
+    }
+
+    /// 最高实体到 H-2 时，焦点必须能恢复到 H-1 顶层空气体素。
+    #[test]
+    fn focus_recovery_can_use_top_air_layer() {
+        let mut solid = Vec::new();
+        for y in 0..=62 {
+            solid.push(IVec3::new(10, y, 10));
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(10.5, 40.5, 10.5),
+            0.0,
+            PITCH_MIN,
+            12.0,
+        );
+        assert!(rig.recover_focus_to_air(&world));
+        assert_eq!(rig.focus_voxel().y, 63, "应恢复到 H-1 顶层空气格");
+        assert!(rig.focus.y < 64.0, "焦点仍必须位于世界垂直范围内");
+        assert!(!rig.focus_is_solid(&world));
     }
 }

@@ -38,3 +38,6 @@ jobs:
 
       - name: 旧名称扫描
         run: bash scripts/check_naming.sh
+
+      - name: Shell 脚本语法
+        run: bash -n scripts/*.sh

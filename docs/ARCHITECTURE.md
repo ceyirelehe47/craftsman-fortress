@@ -30,7 +30,7 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 |---|---|
 | `app.rs` / `app_state.rs` | 组装插件、状态机 `Loading → Ready → Finished`、UI 文本 |
 | `config.rs` | 命令行解析（Seed/尺寸/窗口/验收开关）；`DEFAULT_SEED=12345` 固定验收预设 |
-| `camera.rs` | 焦点轨道相机（`CameraRig` 为权威，`Transform` 是投影）；碰撞收缩 + 一阶平滑（无振荡） |
+| `camera.rs` | 焦点轨道相机；普通交互焦点采用小步 DDA sweep + 按轴滑动，眼位采用碰撞收缩 + 一阶平滑 |
 | `picking.rs` | Amanatides & Woo DDA 拾取；脚本射线与鼠标射线共用；gizmos 高亮 |
 | `diagnostics.rs` | 20 TPS 固定步计数、HUD、CSV 指标、RSS 采样、visible-unready 诊断 |
 | `features.rs` | 验收世界八类地形特征自动探测（纯数据，供测试与验收共享） |
@@ -42,8 +42,9 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 - **加载策略**：CPU 世界数据全常驻（2048 chunks 约 34 MiB 原始体素），加载期每帧 10 ms 预算分片
   生成 + 网格化，完成后切 `Ready`；因此正式巡航中 visible-unready 恒为 0（A07）。
 - **边界重建**：`set_voxel` 在体素贴 Chunk 边时同时标脏本块与邻居块；渲染层每帧消费脏队列。
-- **相机约束**：俯仰/距离/焦点范围全部钳制；从焦点向相机方向 DDA，命中实体则收缩轨道距离，
-  `dist` 一阶指数平滑收敛（A08 无振荡的根据）。
+- **焦点运动**：大位移拆为小于半格的子步；每个子步先对完整路径做 DDA sweep，受阻后按轴尝试滑动，防止低帧率/高速输入穿过一格厚实体。
+- **垂直边界**：焦点允许使用世界最顶层空气体素（`y < H`），因此 `H-2` 的最高实体列可恢复到 `H-1` 空气层。
+- **眼位约束**：从焦点向相机方向 DDA，命中实体则收缩轨道距离；`dist` 一阶指数平滑收敛。
 
 ## Bevy 渲染底层 / 第三方接点（迁移敏感区）
 
@@ -64,3 +65,5 @@ render.rs       Bevy 资源装配：Mesh/StandardMaterial 实体生命周期、�
 `scripts/acceptance.sh`（静态检查 + 审计 + 测试 + 构建）→
 应用内 `AcceptancePlugin`（巡航 + 采样 + 判定）→ `report.json` / 退出码 →
 独立 Reviewer 干净重跑（A14）。
+
+封版时区分代码验收提交 `S` 与后置报告提交 `R`：两套原始证据和不可移动标签都指向 `S`；`R` 只补充 `docs/REVIEW.md`，不能改变证据目标。`scripts/publish_r1_1_release.sh` 与 `scripts/verify_r1_1_release.sh` 负责检查这一关系。
