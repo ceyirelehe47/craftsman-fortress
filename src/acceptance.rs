@@ -176,7 +176,7 @@ pub struct AcceptanceState {
     pub unready_violation_frames: u32,
     pub speed_violations: u32,
     pub oscillation_events: u32,
-    pub dist_history: VecDeque<(f64, f32)>,
+    pub dist_history: VecDeque<(f64, f32, f32)>,
     /// 上帧跳变断言样本（时间戳 + 期望眼位）。
     pub last_eye: Option<(f64, Vec3)>,
     pub last_dist_delta_sign: i32,
@@ -1163,20 +1163,21 @@ fn acceptance_control(
         }
         acc.last_eye = Some((t, target_eye));
 
-        // 距离振荡检测（A08）：只计"摆幅不衰减的连续交替"（真振荡）。
-        // 一阶滤波对波动输入的正常跟踪（交替但衰减）不算不稳定。
-        acc.dist_history.push_back((t, rig.0.dist));
+        // 距离振荡检测（A08）：只计"摆幅不衰减的连续交替"且碰撞钳制值
+        // 保持不变——这是系统自激振荡的特征（clamped 由几何决定、与 dist
+        // 无反馈回路，恒定几何下 dist 交替只可能是数值反弹）。
+        // 贴地飞行时地形驱动的"压缩-放宽"交替伴随 clamped 变化，属正常
+        // 几何响应，不计振荡。
+        acc.dist_history
+            .push_back((t, rig.0.dist, rig.0.last_clamped));
         if acc.dist_history.len() > 240 {
             acc.dist_history.pop_front();
         }
-        let delta = rig.0.dist
-            - acc
-                .dist_history
-                .iter()
-                .rev()
-                .nth(1)
-                .map(|&(_, d)| d)
-                .unwrap_or(rig.0.dist);
+        let prev_sample = acc.dist_history.iter().rev().nth(1).copied();
+        let delta = match prev_sample {
+            Some((_, d, _)) => rig.0.dist - d,
+            None => 0.0,
+        };
         let sign = if delta > 0.05 {
             1
         } else if delta < -0.05 {
@@ -1186,11 +1187,16 @@ fn acceptance_control(
         };
         if sign != 0 {
             if sign == -acc.last_dist_delta_sign && acc.last_dist_delta_sign != 0 {
-                // 一次交替：摆幅明显衰减（<85%）=> 正常收敛，打断连续计数；
-                // 连续 6 次不衰减交替 => 真振荡（等幅摆动不收敛）。
+                // 一次交替：几何未变（clamped 恒定）且摆幅不衰减（≥85%）
+                // => 自激振荡征兆，累计连续计数；连续 6 次记 1 事件。
+                // 摆幅明显衰减（正常收敛）或几何在变（地形驱动）都打断。
                 let last_amp = acc.last_dist_delta_abs;
                 let amp = delta.abs();
-                if last_amp > 0.0 && amp >= last_amp * 0.85 {
+                let clamped_stable = match prev_sample {
+                    Some((_, _, c)) => (rig.0.last_clamped - c).abs() < 0.05,
+                    None => false,
+                };
+                if last_amp > 0.0 && amp >= last_amp * 0.85 && clamped_stable {
                     acc.osc_run += 1;
                     if acc.osc_run >= 6 {
                         acc.oscillation_events += 1;

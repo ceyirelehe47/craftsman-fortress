@@ -48,6 +48,9 @@ pub struct CameraRig {
     pub max_focus_y: f32,
     /// 用户输入锁定（脚本相机接管时为 true）。
     pub control_locked: bool,
+    /// 最近一次求解的碰撞钳制距离（几何状态的读数；A08 振荡检测用它
+    /// 区分"几何驱动的距离交替"与"系统自激振荡"：后者钳制值不变）。
+    pub last_clamped: f32,
 }
 
 impl Default for CameraRig {
@@ -73,6 +76,7 @@ impl CameraRig {
             bounds: (8.0, world_size.0 - 8.0, 8.0, world_size.2 - 8.0),
             max_focus_y: world_size.1 - 2.0,
             control_locked: false,
+            last_clamped: dist.clamp(DIST_MIN, DIST_MAX),
         }
     }
 
@@ -299,6 +303,7 @@ pub fn camera_solve_system(
     // 焦点纠错必须先于碰撞钳制，DDA 起点（焦点）必须已在空气中。
     rig.recover_focus_to_air(world);
     let clamped = rig.collision_clamped_dist(world);
+    rig.last_clamped = clamped;
     // 平滑只作用于"放宽"方向：先向用户目标距离收敛，再被碰撞上限硬性钳住。
     // 收缩即时（防穿模优先，消除平滑超前导致的瞬态入模）；clamped 由几何决定、
     // 不依赖 dist，无反馈回路 => 不可能振荡（A08）。
