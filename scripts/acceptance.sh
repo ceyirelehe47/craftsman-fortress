@@ -206,14 +206,15 @@ find "$EVIDENCE_DIR" -type f ! -name "SHA256SUMS.txt" -print0 \
   | xargs -0 sha256sum > "$EVIDENCE_DIR/SHA256SUMS.txt"
 rm -f "$EVIDENCE_DIR/SHA256SUMS.partial.txt" "$EVIDENCE_DIR/last_exit_code.txt"
 # ZIP 打包：优先 zip，其次 Windows 自带 bsdtar（-a 按后缀产出 zip），
-# 最后 PowerShell Compress-Archive。
+# 最后 PowerShell Compress-Archive。zip 生成在仓库根目录下。
 ZIP_FILE="${EVIDENCE_DIR}.zip"
 rm -f "$ZIP_FILE"
 BSDTAR="/c/Windows/System32/tar.exe"
+REPO_NAME=$(basename "$(pwd)")
 if command -v zip > /dev/null 2>&1; then
   zip -qr "$ZIP_FILE" "$EVIDENCE_DIR"
 elif [ -x "$BSDTAR" ]; then
-  (cd .. && "$BSDTAR" -a -cf "$(basename "$(pwd)")/$ZIP_FILE" "$EVIDENCE_DIR")
+  (cd .. && "$BSDTAR" -a -cf "$REPO_NAME/$ZIP_FILE" "$REPO_NAME/$EVIDENCE_DIR")
 elif command -v powershell > /dev/null 2>&1; then
   powershell -NoProfile -Command "Compress-Archive -Path '$EVIDENCE_DIR' -DestinationPath '$ZIP_FILE'" \
     > /dev/null 2>&1
