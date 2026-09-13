@@ -7,8 +7,9 @@
 use crate::app_state::GameState;
 use crate::camera::WorldRes;
 use crate::persistence;
-use crate::picking::CurrentPickRes;
+use crate::picking::{CurrentPickRes, PickHit};
 use crate::voxel::BlockId;
+use crate::world::{EditReject, World};
 use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -39,6 +40,38 @@ impl SaveRuntime {
 #[derive(Component)]
 struct SaveStatusText;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditAction {
+    Remove,
+    PlaceStone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditOutcome {
+    NoSelection,
+    NoChange,
+    Changed { voxel: IVec3, block: BlockId },
+}
+
+fn apply_edit_action(
+    world: &mut World,
+    hit: Option<PickHit>,
+    action: EditAction,
+) -> Result<EditOutcome, EditReject> {
+    let Some(hit) = hit else {
+        return Ok(EditOutcome::NoSelection);
+    };
+    let (voxel, block) = match action {
+        EditAction::Remove => (hit.voxel, BlockId::Air),
+        EditAction::PlaceStone => (hit.place, BlockId::Stone),
+    };
+    if world.try_user_edit(voxel, block)? {
+        Ok(EditOutcome::Changed { voxel, block })
+    } else {
+        Ok(EditOutcome::NoChange)
+    }
+}
+
 pub fn plugin(app: &mut App, logical_path: PathBuf, loaded_generation: Option<u64>) {
     app.insert_resource(SaveRuntime::new(logical_path, loaded_generation));
     app.add_systems(Startup, spawn_save_status);
@@ -68,6 +101,42 @@ fn spawn_save_status(mut commands: Commands) {
     ));
 }
 
+fn apply_action_and_update_status(
+    world: &mut World,
+    hit: Option<PickHit>,
+    action: EditAction,
+    save: &mut SaveRuntime,
+) {
+    match apply_edit_action(world, hit, action) {
+        Ok(EditOutcome::Changed { voxel, block }) => {
+            save.dirty = true;
+            save.last_message = if block == BlockId::Air {
+                format!("Removed voxel {voxel}")
+            } else {
+                format!("Placed Stone at {voxel}")
+            };
+        }
+        Ok(EditOutcome::NoChange) => {
+            save.last_message = match action {
+                EditAction::Remove => "Remove: no change".into(),
+                EditAction::PlaceStone => "Place: no change".into(),
+            };
+        }
+        Ok(EditOutcome::NoSelection) => {
+            save.last_message = match action {
+                EditAction::Remove => "Remove: no voxel selected".into(),
+                EditAction::PlaceStone => "Place: no voxel selected".into(),
+            };
+        }
+        Err(e) => {
+            save.last_message = match action {
+                EditAction::Remove => format!("Remove blocked: {e}"),
+                EditAction::PlaceStone => format!("Place blocked: {e}"),
+            };
+        }
+    }
+}
+
 fn edit_and_save_input(
     keys: Res<ButtonInput<KeyCode>>,
     pick: Res<CurrentPickRes>,
@@ -79,31 +148,11 @@ fn edit_and_save_input(
     };
 
     if keys.just_pressed(KeyCode::Delete) {
-        match pick.0 {
-            Some(hit) => match world.try_user_edit(hit.voxel, BlockId::Air) {
-                Ok(true) => {
-                    save.dirty = true;
-                    save.last_message = format!("Removed voxel {}", hit.voxel);
-                }
-                Ok(false) => save.last_message = "Remove: no change".into(),
-                Err(e) => save.last_message = format!("Remove blocked: {e}"),
-            },
-            None => save.last_message = "Remove: no voxel selected".into(),
-        }
+        apply_action_and_update_status(world, pick.0, EditAction::Remove, &mut save);
     }
 
     if keys.just_pressed(KeyCode::KeyB) {
-        match pick.0 {
-            Some(hit) => match world.try_user_edit(hit.place, BlockId::Stone) {
-                Ok(true) => {
-                    save.dirty = true;
-                    save.last_message = format!("Placed Stone at {}", hit.place);
-                }
-                Ok(false) => save.last_message = "Place: no change".into(),
-                Err(e) => save.last_message = format!("Place blocked: {e}"),
-            },
-            None => save.last_message = "Place: no voxel selected".into(),
-        }
+        apply_action_and_update_status(world, pick.0, EditAction::PlaceStone, &mut save);
     }
 
     if keys.just_pressed(KeyCode::F5) {
@@ -153,4 +202,30 @@ fn update_save_status(
         save.logical_path.display(),
         save.last_message
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coords::WorldSize;
+    use crate::generation::TerrainParams;
+
+    #[test]
+    fn no_selection_edit_is_a_true_noop() {
+        let mut world = World::generate_all(WorldSize::new(32, 32, 32), TerrainParams::new(7));
+        let hash = world.semantic_hash();
+        let edits = world.modification_count();
+
+        assert_eq!(
+            apply_edit_action(&mut world, None, EditAction::Remove).unwrap(),
+            EditOutcome::NoSelection
+        );
+        assert_eq!(
+            apply_edit_action(&mut world, None, EditAction::PlaceStone).unwrap(),
+            EditOutcome::NoSelection
+        );
+        assert_eq!(world.semantic_hash(), hash);
+        assert_eq!(world.modification_count(), edits);
+        assert_eq!(world.dirty_count(), 0);
+    }
 }
