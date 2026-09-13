@@ -16,11 +16,11 @@ jobs:
           toolchain: "1.98.1"
           components: rustfmt, clippy
 
-      # Bevy 在 Linux 构建需要 ALSA 与 udev 开发头文件。
+      # Bevy 在 Linux 构建需要 ALSA、udev 与 Wayland 开发文件。
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
