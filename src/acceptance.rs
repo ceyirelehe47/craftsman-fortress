@@ -2112,22 +2112,31 @@ fn finalize(
     // 每帧主动 sleep，渲染帧率显著更低）。两阶段固定步速率都必须为
     // 20±2%，且两阶段实测平均 FPS 必须显著不同（否则"不同帧率阶段"
     // 前提不成立，判定无效）。
-    let tick_at = |t0: f64, t1: f64| -> Option<(f64, f64)> {
-        let a = acc
+    // TPS 用窗口内 1Hz 样本（t, tick 计数）的最小二乘回归斜率：端点差分
+    // 受采样边界 ±1 tick 影响在 68-120s 窗口上漂移可达 ±1.5%（实测
+    // 轮间 19.57-19.91，而真实斜率恒为 19.998）；回归斜率对边界噪声
+    // 鲁棒，且与帧率无关。
+    let tick_slope = |t0: f64, t1: f64| -> Option<(f64, usize)> {
+        let pts: Vec<(f64, u64)> = acc
             .tick_samples
             .iter()
-            .find(|(ts, _)| *ts >= t0)
-            .map(|(_, c)| *c);
-        let b = acc
-            .tick_samples
-            .iter()
-            .rev()
-            .find(|(ts, _)| *ts <= t1)
-            .map(|(_, c)| *c);
-        match (a, b) {
-            (Some(a), Some(b)) => Some((t1 - t0, b.saturating_sub(a) as f64)),
-            _ => None,
+            .filter(|(ts, _)| *ts >= t0 && *ts <= t1)
+            .copied()
+            .collect();
+        let n = pts.len();
+        if n < 10 {
+            return None;
         }
+        let nf = n as f64;
+        let st: f64 = pts.iter().map(|p| p.0).sum();
+        let sc: f64 = pts.iter().map(|p| p.1 as f64).sum();
+        let stt: f64 = pts.iter().map(|p| p.0 * p.0).sum();
+        let stc: f64 = pts.iter().map(|p| p.0 * p.1 as f64).sum();
+        let denom = nf * stt - st * st;
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        Some(((nf * stc - st * sc) / denom, n))
     };
     let fps_mean = |t0: f64, t1: f64| -> Option<f64> {
         let s: Vec<f32> = acc
@@ -2143,14 +2152,12 @@ fn finalize(
         }
     };
     let (a10, a10_detail) = match (
-        tick_at(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END),
-        tick_at(T_LOW_ALT_MEASURE_START, T_LOW_ALT_MEASURE_END),
+        tick_slope(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END),
+        tick_slope(T_LOW_ALT_MEASURE_START, T_LOW_ALT_MEASURE_END),
         fps_mean(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END),
         fps_mean(T_LOW_ALT_MEASURE_START, T_LOW_ALT_MEASURE_END),
     ) {
-        (Some((secs1, delta1)), Some((secs2, delta2)), Some(fps1), Some(fps2)) => {
-            let rate1 = delta1 / secs1;
-            let rate2 = delta2 / secs2;
+        (Some((rate1, n1)), Some((rate2, n2)), Some(fps1), Some(fps2)) => {
             let ok1 = (rate1 - TPS).abs() / TPS <= 0.02;
             let ok2 = (rate2 - TPS).abs() / TPS <= 0.02;
             // 渲染帧率必须显著不同（节流窗 ≥15% 降幅），否则前提不成立。
@@ -2159,8 +2166,7 @@ fn finalize(
             (
                 ok,
                 format!(
-                    "正常帧率窗 {secs1:.0}s：{delta1} 步 = {rate1:.3} TPS（FPS 均值 {fps1:.1}）；节流窗 {secs2:.0}s：{delta2} 步 = {rate2:.3} TPS（FPS 均值 {fps2:.1}）；TPS 均 20±2% 且帧率分离（≥1.15×）={} ",
-                    fps_sep
+                    "正常帧率窗 {n1} 样本回归斜率 {rate1:.3} TPS（FPS 均值 {fps1:.1}）；节流窗 {n2} 样本回归斜率 {rate2:.3} TPS（FPS 均值 {fps2:.1}）；TPS 均 20±2% 且帧率分离（≥1.15×）={fps_sep}"
                 ),
             )
         }
