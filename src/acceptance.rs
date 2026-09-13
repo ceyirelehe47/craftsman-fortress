@@ -175,7 +175,8 @@ pub struct AcceptanceState {
     pub speed_violations: u32,
     pub oscillation_events: u32,
     pub dist_history: VecDeque<(f64, f32)>,
-    pub last_eye: Option<Vec3>,
+    /// 上帧跳变断言样本（时间戳 + 期望眼位）。
+    pub last_eye: Option<(f64, Vec3)>,
     pub last_dist_delta_sign: i32,
     pub last_dist_delta_abs: f32,
     pub osc_run: u32,
@@ -1103,6 +1104,9 @@ fn acceptance_control(
         // 断言对象是"本帧将要应用的位姿"（控制信号）与上帧位姿的差：
         // 段切换/瞬移恰好出现在 seg_changed 帧，豁免配对才正确
         // （若用 rig 上帧位姿，跳变样本会滞后一帧、逃出豁免——run6 教训）。
+        // 帧间隔毛刺守卫：帧间隔 >0.1s 时位移 = 真实速度 × 毛刺时长
+        //（旋转峰值 ~55 m/s × 0.23s ≈ 12.9 m 即此类），不代表控制不连续，
+        // 跳过该次比较——这是测量有效性守卫，不是场景豁免。
         let mut ctrl = rig.0.clone();
         ctrl.focus = focus;
         ctrl.yaw = yaw;
@@ -1110,8 +1114,9 @@ fn acceptance_control(
         ctrl.target_dist = target_dist.max(1.5);
         ctrl.clamp_all();
         let target_eye = ctrl.target_eye();
-        if let Some(last) = acc.last_eye {
-            if t >= T_CRUISE_START && !seg_changed {
+        if let Some((last_t, last)) = acc.last_eye {
+            let dt_sample = t - last_t;
+            if t >= T_CRUISE_START && !seg_changed && dt_sample > 0.0 && dt_sample <= 0.1 {
                 let step = (target_eye - last).length();
                 if step > MAX_EYE_STEP {
                     acc.speed_violations += 1;
@@ -1125,7 +1130,7 @@ fn acceptance_control(
                 }
             }
         }
-        acc.last_eye = Some(target_eye);
+        acc.last_eye = Some((t, target_eye));
 
         // 距离振荡检测（A08）：只计"摆幅不衰减的连续交替"（真振荡）。
         // 一阶滤波对波动输入的正常跟踪（交替但衰减）不算不稳定。
@@ -1821,8 +1826,14 @@ fn finalize(
                     for dy in -1..=1 {
                         for dz in -1..=1 {
                             for dx in -1..=1 {
-                                if (dx, dy, dz) != (0, 0, 0) {
-                                    hood.ensure_chunk(cc + IVec3::new(dx, dy, dz));
+                                if (dx, dy, dz) == (0, 0, 0) {
+                                    continue;
+                                }
+                                let ncc = cc + IVec3::new(dx, dy, dz);
+                                // 探针世界边缘的邻居越界：跳过（越界处无
+                                // Chunk 槽位，"邻域生成"只含界内邻居）。
+                                if probe_size.contains_chunk(ncc) {
+                                    hood.ensure_chunk(ncc);
                                 }
                             }
                         }

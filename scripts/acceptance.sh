@@ -146,8 +146,9 @@ tail -n 30 "$EVIDENCE_DIR/app_stdout.log"
 # ---------------------------------------------------------------------------
 step "日志错误扫描（panic / ERROR / FATAL / 持续重复）"
 LOG="$EVIDENCE_DIR/app_stdout.log"
-# 1) panic / FATAL / ERROR：0 容忍（日志级别字段与正文中出现均算命中）。
-SCAN_HITS=$(grep -nE "panicked|FATAL|ERROR" "$LOG" || true)
+# 1) panic / FATAL / ERROR：0 容忍（覆盖 "panicked at ..." 与 Bevy 的
+#    "Encountered a panic in system ..." 两种形态，日志级别字段与正文均算）。
+SCAN_HITS=$(grep -nE "panic|FATAL|ERROR" "$LOG" || true)
 if [ -n "$SCAN_HITS" ]; then
   echo "日志扫描失败：发现错误信号：" >&2
   printf '%s\n' "$SCAN_HITS" | head -20 >&2
