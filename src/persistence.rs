@@ -21,6 +21,10 @@ pub const WORLD_GENERATOR_REVISION: u32 = 1;
 const HEADER_LEN: usize = 64;
 const RECORD_LEN: usize = 16;
 const TRAILER_LEN: usize = 8;
+/// R2.1 防御性上限：存档大小与玩家修改量相关，但解码不得接受无界分配请求。
+pub const MAX_EDIT_COUNT: u32 = 1_000_000;
+const MAX_SAVE_BYTES: u64 =
+    HEADER_LEN as u64 + MAX_EDIT_COUNT as u64 * RECORD_LEN as u64 + TRAILER_LEN as u64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveMeta {
@@ -223,14 +227,23 @@ fn encode_world(world: &World, generation: u64) -> Result<Vec<u8>, SaveError> {
     let edits = world.modifications_sorted();
     let edit_count =
         u32::try_from(edits.len()).map_err(|_| SaveError::Invalid("too many edits".into()))?;
+    if edit_count > MAX_EDIT_COUNT {
+        return Err(SaveError::Invalid(format!(
+            "edit count {edit_count} exceeds limit {MAX_EDIT_COUNT}"
+        )));
+    }
     for &(voxel, block) in &edits {
         validate_edit(world.size, &world.params, voxel, block)?;
     }
 
     let base_hash = world.generated_semantic_hash();
     let world_hash = world.semantic_hash();
+    let record_bytes = edits
+        .len()
+        .checked_mul(RECORD_LEN)
+        .ok_or_else(|| SaveError::Invalid("save record size overflow".into()))?;
     let capacity = HEADER_LEN
-        .checked_add(edits.len().saturating_mul(RECORD_LEN))
+        .checked_add(record_bytes)
         .and_then(|v| v.checked_add(TRAILER_LEN))
         .ok_or_else(|| SaveError::Invalid("save size overflow".into()))?;
     let mut out = Vec::with_capacity(capacity);
@@ -262,6 +275,12 @@ fn encode_world(world: &World, generation: u64) -> Result<Vec<u8>, SaveError> {
 fn decode_bytes(bytes: &[u8]) -> Result<DecodedSave, SaveError> {
     if bytes.len() < HEADER_LEN + TRAILER_LEN {
         return Err(SaveError::Invalid("file is truncated".into()));
+    }
+    if bytes.len() as u64 > MAX_SAVE_BYTES {
+        return Err(SaveError::Invalid(format!(
+            "file size {} exceeds limit {MAX_SAVE_BYTES}",
+            bytes.len()
+        )));
     }
     let data_len = bytes.len() - TRAILER_LEN;
     let expected_checksum = u64::from_le_bytes(
@@ -297,11 +316,19 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedSave, SaveError> {
     let size = WorldSize::new(r.u32()?, r.u32()?, r.u32()?);
     validate_size(size)?;
     let edit_count = r.u32()?;
+    if edit_count > MAX_EDIT_COUNT {
+        return Err(SaveError::Invalid(format!(
+            "edit count {edit_count} exceeds limit {MAX_EDIT_COUNT}"
+        )));
+    }
     let base_semantic_hash = r.u64()?;
     let world_semantic_hash = r.u64()?;
 
+    let record_bytes = (edit_count as usize)
+        .checked_mul(RECORD_LEN)
+        .ok_or_else(|| SaveError::Invalid("record length overflow".into()))?;
     let expected_len = HEADER_LEN
-        .checked_add((edit_count as usize).saturating_mul(RECORD_LEN))
+        .checked_add(record_bytes)
         .ok_or_else(|| SaveError::Invalid("record length overflow".into()))?;
     if expected_len != data_len {
         return Err(SaveError::Invalid(format!(
@@ -313,6 +340,7 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedSave, SaveError> {
     let params = TerrainParams::new(seed);
     let mut edits = Vec::with_capacity(edit_count as usize);
     let mut seen = HashSet::with_capacity(edit_count as usize);
+    let mut previous_key: Option<(i32, i32, i32)> = None;
     for _ in 0..edit_count {
         let voxel = IVec3::new(r.i32()?, r.i32()?, r.i32()?);
         let block_byte = r.take::<1>()?[0];
@@ -323,9 +351,18 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedSave, SaveError> {
         let block = BlockId::try_from_u8(block_byte)
             .ok_or_else(|| SaveError::Invalid(format!("unknown block id {block_byte}")))?;
         validate_edit(size, &params, voxel, block)?;
-        if !seen.insert((voxel.x, voxel.y, voxel.z)) {
+        let key = (voxel.x, voxel.y, voxel.z);
+        if !seen.insert(key) {
             return Err(SaveError::Invalid(format!("duplicate edit at {voxel}")));
         }
+        if let Some(previous) = previous_key {
+            if key <= previous {
+                return Err(SaveError::Invalid(format!(
+                    "edit records are not strictly sorted: previous={previous:?}, current={key:?}"
+                )));
+            }
+        }
+        previous_key = Some(key);
         edits.push((voxel, block));
     }
 
@@ -346,9 +383,21 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedSave, SaveError> {
 
 fn read_decoded(path: &Path) -> Result<DecodedSave, SaveError> {
     let mut file = File::open(path)?;
-    let mut bytes = Vec::new();
+    let file_len = file.metadata()?.len();
+    if file_len > MAX_SAVE_BYTES {
+        return Err(SaveError::Invalid(format!(
+            "file size {file_len} exceeds limit {MAX_SAVE_BYTES}"
+        )));
+    }
+    let capacity = usize::try_from(file_len)
+        .map_err(|_| SaveError::Invalid("file size does not fit memory index".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
     file.read_to_end(&mut bytes)?;
     decode_bytes(&bytes)
+}
+
+fn read_materialized(path: &Path) -> Result<LoadedWorld, SaveError> {
+    materialize(read_decoded(path)?, path.to_path_buf())
 }
 
 fn materialize(decoded: DecodedSave, slot_path: PathBuf) -> Result<LoadedWorld, SaveError> {
@@ -379,42 +428,55 @@ fn materialize(decoded: DecodedSave, slot_path: PathBuf) -> Result<LoadedWorld, 
 
 /// 读取两个槽位，忽略损坏槽并选择 generation 最大的有效存档。
 pub fn load_latest(logical: &Path) -> Result<LoadedWorld, SaveError> {
-    let mut valid: Vec<(DecodedSave, PathBuf)> = Vec::new();
+    let mut best: Option<LoadedWorld> = None;
     let mut details = Vec::new();
     for path in slot_paths(logical) {
         if !path.exists() {
             details.push(format!("{}: missing", path.display()));
             continue;
         }
-        match read_decoded(&path) {
-            Ok(decoded) => valid.push((decoded, path)),
+        match read_materialized(&path) {
+            Ok(loaded) => {
+                let replace = best
+                    .as_ref()
+                    .map(|current| loaded.meta.generation > current.meta.generation)
+                    .unwrap_or(true);
+                if replace {
+                    best = Some(loaded);
+                }
+            }
             Err(e) => details.push(format!("{}: {e}", path.display())),
         }
     }
-    let (decoded, path) = valid
-        .into_iter()
-        .max_by_key(|(decoded, _)| decoded.meta.generation)
-        .ok_or_else(|| SaveError::NoValidSlot {
-            logical: logical.to_path_buf(),
-            details,
-        })?;
-    materialize(decoded, path)
+    best.ok_or_else(|| SaveError::NoValidSlot {
+        logical: logical.to_path_buf(),
+        details,
+    })
 }
 
 /// 双槽原子保存。不会原地覆盖当前最新有效槽位。
 pub fn save_atomic(logical: &Path, world: &World) -> Result<SaveReceipt, SaveError> {
     let paths = slot_paths(logical);
-    let mut valid_meta = Vec::new();
+    // “当前有效槽”必须能完整物化并通过基础/最终语义哈希，不能只通过 FNV 解码。
+    let mut latest: Option<(u64, usize)> = None;
     for (slot, path) in paths.iter().enumerate() {
-        if let Ok(decoded) = read_decoded(path) {
-            valid_meta.push((decoded.meta.generation, slot));
+        if let Ok(loaded) = read_materialized(path) {
+            let candidate = (loaded.meta.generation, slot);
+            if latest
+                .as_ref()
+                .map(|(generation, _)| candidate.0 > *generation)
+                .unwrap_or(true)
+            {
+                latest = Some(candidate);
+            }
         }
     }
-    let latest = valid_meta
-        .iter()
-        .max_by_key(|(generation, _)| *generation)
-        .copied();
-    let next_generation = latest.map(|(g, _)| g.saturating_add(1)).unwrap_or(1);
+    let next_generation = match latest {
+        Some((generation, _)) => generation
+            .checked_add(1)
+            .ok_or_else(|| SaveError::Invalid("generation overflow".into()))?,
+        None => 1,
+    };
     let target_slot = latest.map(|(_, slot)| 1usize - slot).unwrap_or(0);
     let target = &paths[target_slot];
     if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -449,7 +511,7 @@ pub fn save_atomic(logical: &Path, world: &World) -> Result<SaveReceipt, SaveErr
     }
     write_result?;
 
-    let verify = read_decoded(target)?;
+    let verify = read_materialized(target)?;
     if verify.meta.generation != next_generation
         || verify.meta.world_semantic_hash != world.semantic_hash()
     {
@@ -531,6 +593,141 @@ mod tests {
         let data_len = bytes.len() - TRAILER_LEN;
         let checksum = checksum64(&bytes[..data_len]);
         bytes[data_len..].copy_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn corrupt_u64_field(path: &Path, offset: usize) {
+        let mut bytes = fs::read(path).unwrap();
+        let mut value = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        value ^= 0x9e37_79b9_7f4a_7c15;
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        refresh_checksum(&mut bytes);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn semantic_base_hash_invalid_latest_falls_back() {
+        let logical = temp_logical("base-hash-fallback");
+        let world = edited_world();
+        let first = save_atomic(&logical, &world).unwrap();
+        let second = save_atomic(&logical, &world).unwrap();
+        corrupt_u64_field(&second.slot_path, 48);
+        let loaded = load_latest(&logical).unwrap();
+        assert_eq!(loaded.meta.generation, first.generation);
+        assert_eq!(loaded.world.semantic_hash(), world.semantic_hash());
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn semantic_world_hash_invalid_latest_falls_back() {
+        let logical = temp_logical("world-hash-fallback");
+        let world = edited_world();
+        let first = save_atomic(&logical, &world).unwrap();
+        let second = save_atomic(&logical, &world).unwrap();
+        corrupt_u64_field(&second.slot_path, 56);
+        let loaded = load_latest(&logical).unwrap();
+        assert_eq!(loaded.meta.generation, first.generation);
+        assert_eq!(loaded.world.semantic_hash(), world.semantic_hash());
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn semantically_changed_record_with_valid_checksum_falls_back() {
+        let logical = temp_logical("record-semantic-fallback");
+        let world = edited_world();
+        let first = save_atomic(&logical, &world).unwrap();
+        let second = save_atomic(&logical, &world).unwrap();
+        let mut bytes = fs::read(&second.slot_path).unwrap();
+        let x = i32::from_le_bytes(bytes[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap());
+        let y = i32::from_le_bytes(bytes[HEADER_LEN + 4..HEADER_LEN + 8].try_into().unwrap());
+        let z = i32::from_le_bytes(bytes[HEADER_LEN + 8..HEADER_LEN + 12].try_into().unwrap());
+        let voxel = IVec3::new(x, y, z);
+        let original = BlockId::try_from_u8(bytes[HEADER_LEN + 12]).unwrap();
+        let generated = generated_block_at(&world.params, voxel, world.size.y);
+        let replacement = BlockId::ALL
+            .into_iter()
+            .find(|block| *block != BlockId::Bedrock && *block != original && *block != generated)
+            .expect("must have a valid alternate block");
+        bytes[HEADER_LEN + 12] = replacement as u8;
+        refresh_checksum(&mut bytes);
+        fs::write(&second.slot_path, bytes).unwrap();
+        let loaded = load_latest(&logical).unwrap();
+        assert_eq!(loaded.meta.generation, first.generation);
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn both_semantically_invalid_slots_report_both_failures() {
+        let logical = temp_logical("both-invalid");
+        let world = edited_world();
+        let first = save_atomic(&logical, &world).unwrap();
+        let second = save_atomic(&logical, &world).unwrap();
+        corrupt_u64_field(&first.slot_path, 48);
+        corrupt_u64_field(&second.slot_path, 56);
+        let error = match load_latest(&logical) {
+            Err(error) => error,
+            Ok(_) => panic!("both invalid slots must fail"),
+        };
+        match error {
+            SaveError::NoValidSlot { details, .. } => {
+                assert_eq!(details.len(), 2);
+                assert!(details.iter().any(|d| d.contains("base hash mismatch")));
+                assert!(details.iter().any(|d| d.contains("world hash mismatch")));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn save_preserves_only_fully_valid_old_slot() {
+        let logical = temp_logical("preserve-valid");
+        let world = edited_world();
+        let first = save_atomic(&logical, &world).unwrap();
+        let second = save_atomic(&logical, &world).unwrap();
+        let first_bytes = fs::read(&first.slot_path).unwrap();
+        corrupt_u64_field(&second.slot_path, 56);
+        let repaired = save_atomic(&logical, &world).unwrap();
+        assert_eq!(fs::read(&first.slot_path).unwrap(), first_bytes);
+        assert_eq!(repaired.slot_path, second.slot_path);
+        assert_eq!(
+            load_latest(&logical).unwrap().meta.generation,
+            repaired.generation
+        );
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn generation_overflow_is_rejected_before_write() {
+        let logical = temp_logical("generation-overflow");
+        let world = edited_world();
+        let path = slot_paths(&logical)[0].clone();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_world(&world, u64::MAX).unwrap()).unwrap();
+        let error = match save_atomic(&logical, &world) {
+            Err(error) => error,
+            Ok(_) => panic!("overflow save must fail"),
+        };
+        assert!(error.to_string().contains("generation overflow"));
+        assert_eq!(load_latest(&logical).unwrap().meta.generation, u64::MAX);
+        let _ = fs::remove_dir_all(logical.parent().unwrap());
+    }
+
+    #[test]
+    fn decoder_rejects_out_of_order_and_excessive_count() {
+        let world = edited_world();
+        let bytes = encode_world(&world, 1).unwrap();
+        let mut out_of_order = bytes.clone();
+        let first = out_of_order[HEADER_LEN..HEADER_LEN + RECORD_LEN].to_vec();
+        let second = out_of_order[HEADER_LEN + RECORD_LEN..HEADER_LEN + 2 * RECORD_LEN].to_vec();
+        out_of_order[HEADER_LEN..HEADER_LEN + RECORD_LEN].copy_from_slice(&second);
+        out_of_order[HEADER_LEN + RECORD_LEN..HEADER_LEN + 2 * RECORD_LEN].copy_from_slice(&first);
+        refresh_checksum(&mut out_of_order);
+        assert!(decode_bytes(&out_of_order).is_err());
+
+        let mut excessive = bytes;
+        excessive[44..48].copy_from_slice(&(MAX_EDIT_COUNT + 1).to_le_bytes());
+        refresh_checksum(&mut excessive);
+        assert!(decode_bytes(&excessive).is_err());
     }
 
     #[test]

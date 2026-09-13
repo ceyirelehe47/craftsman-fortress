@@ -42,5 +42,7 @@ jobs:
       - name: Shell 脚本语法
         run: bash -n scripts/*.sh
 
-      - name: R2 headless save roundtrip
-        run: cargo run --release --example r2_roundtrip -- /tmp/craftsman-r2-ci
+      - name: R2.1 headless recovery and startup rejection
+        env:
+          R2_HEADLESS_WATCHDOG_SEC: "300"
+        run: bash scripts/r2_headless_checks.sh /tmp/craftsman-r2-1-ci
