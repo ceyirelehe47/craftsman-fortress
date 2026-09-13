@@ -35,6 +35,8 @@ pub struct DiagState {
     pub fps_ema: f32,
     /// 截图帧排除窗口（避免把读回开销计入性能统计）。
     pub exclude_until: Option<Instant>,
+    /// 节流阶段标记（A10 低帧率阶段）：该阶段帧时不计入 A13 性能门槛。
+    pub throttling: bool,
     /// CSV 指标文件。
     csv: Option<std::fs::File>,
     last_csv: Option<Instant>,
@@ -53,7 +55,7 @@ impl DiagState {
             f,
             "t_s,fps,frame_ms_ema,fixed_ticks,meshed,dirty,visible_unready,rss_mb,\
              cam_x,cam_y,cam_z,focus_x,focus_y,focus_z,\
-             mesh_assets,materials,chunk_entities,mesh_created,mesh_removed"
+             mesh_assets,materials,chunk_entities,mesh_created,mesh_replaced,mesh_removed"
         )?;
         self.csv = Some(f);
         Ok(())
@@ -99,7 +101,7 @@ fn diagnostics_update(
             diag.fps_ema * 0.9 + fps * 0.1
         };
     }
-    if diag.collecting && !diag.excluded() && dt > 0.0 {
+    if diag.collecting && !diag.excluded() && !diag.throttling && dt > 0.0 {
         diag.frame_times.push_back(dt);
         if diag.frame_times.len() > 200_000 {
             diag.frame_times.pop_front();
@@ -197,7 +199,7 @@ fn diagnostics_update(
             let rig = &rig.0;
             let eye = rig.eye();
             csv_line = Some(format!(
-                "{:.2},{:.2},{:.2},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{},{},{},{}",
+                "{:.2},{:.2},{:.2},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{},{},{},{},{}",
                 time.elapsed_secs(),
                 diag.fps_ema,
                 1000.0 / diag.fps_ema.max(1e-6),
@@ -216,6 +218,7 @@ fn diagnostics_update(
                 materials.len(),
                 registry.meshed_count(),
                 stats.mesh_created,
+                stats.mesh_replaced,
                 stats.mesh_removed
             ));
         }

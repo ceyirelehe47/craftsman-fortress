@@ -2,8 +2,8 @@
 //!
 //! - Perspective 投影，围绕可移动"焦点"旋转 / 俯仰 / 缩放；
 //! - 俯仰、距离、焦点范围全部受限且稳定；
-//! - 焦点不得停留于实体体素内：普通键鼠控制横穿山体时，求解层把焦点
-//!   沿所在列抬升到最近空气（贴地滑行，`resolve_focus_out_of_solid`）；
+//! - 普通交互焦点不得进入实体：候选移动经 `apply_interactive_focus_delta`
+//!   按轴滑动或回退；历史非法状态由 `recover_focus_to_air` 确定性恢复；
 //! - 眼位不得进入实体体素：从焦点向相机方向做 DDA，命中则压缩轨道距离
 //!   （可收缩至 0，眼位退到焦点）；一阶指数平滑收敛，无振荡（A08）；
 //! - 验收模式由脚本注入位姿（`control_locked` 锁定用户输入）。
@@ -112,26 +112,38 @@ impl CameraRig {
         rig.desired_eye()
     }
 
-    /// 焦点入实体纠正（普通交互的贴地滑行）：
-    /// 焦点体素为实体时，沿所在列向上找最近空气格，把焦点抬到实体顶面 +
-    /// `FOCUS_SURFACE_MARGIN`。WASD/平移横穿山体、悬崖时焦点保持 在空气中，
-    /// 眼位碰撞钳制（`collision_clamped_dist`）以空气中的焦点为 DDA 起点。
-    /// 洞穴机位（焦点在山体内部的空气格）不触发——只有焦点本身落在实体内才抬升。
-    pub fn resolve_focus_out_of_solid(&mut self, world: &World) {
-        let mut v = IVec3::new(
+    /// 当前焦点所在体素。
+    pub fn focus_voxel(&self) -> IVec3 {
+        IVec3::new(
             self.focus.x.floor() as i32,
             self.focus.y.floor() as i32,
             self.focus.z.floor() as i32,
-        );
-        if !world.size.contains(v) || !world.voxel(v).is_solid() {
-            return;
+        )
+    }
+
+    /// 焦点是否落在世界中的实体体素（越界视为安全）。
+    pub fn focus_is_solid(&self, world: &World) -> bool {
+        let voxel = self.focus_voxel();
+        world.size.contains(voxel) && world.voxel(voxel).is_solid()
+    }
+
+    /// 历史状态非法时的确定性恢复：沿当前列向上寻找最近空气格，
+    /// 抬升到顶面 + `FOCUS_SURFACE_MARGIN`。返回 true 表示发生了恢复。
+    /// 洞穴机位（焦点在山体内部的空气格）不触发——只有焦点本身
+    /// 落在实体内才恢复。
+    pub fn recover_focus_to_air(&mut self, world: &World) -> bool {
+        if !self.focus_is_solid(world) {
+            return false;
         }
+        let mut v = self.focus_voxel();
         while v.y < world.size.y as i32 && world.voxel(v).is_solid() {
             v.y += 1;
         }
         // v.y 现在是实体柱上方的第一个空气格（整列实体时等于 size.y，
         // 由 clamp_all 钳回 max_focus_y 兜底）。
         self.focus.y = (v.y as f32 + FOCUS_SURFACE_MARGIN).min(self.max_focus_y);
+        debug_assert!(!self.focus_is_solid(world) || v.y >= world.size.y as i32);
+        true
     }
 
     /// 碰撞钳制：从焦点向理想相机方向步进，命中实体则收缩距离。
@@ -161,15 +173,51 @@ impl CameraRig {
     }
 }
 
+/// 应用普通交互焦点位移（键鼠平移/升降/拖动与普通交互探针共用的唯一入口）。
+/// 完整候选若进入实体，则尝试按轴滑动（保留单轴候选）；仍不安全时回退
+/// 旧焦点；历史状态已经非法时再向上确定性恢复。
+/// 返回 true 表示本次移动被阻挡或修正。
+pub fn apply_interactive_focus_delta(rig: &mut CameraRig, world: &World, delta: Vec3) -> bool {
+    if delta.length_squared() <= f32::EPSILON {
+        return rig.recover_focus_to_air(world);
+    }
+    let previous = rig.focus;
+    rig.focus += delta;
+    rig.clamp_all();
+    if !rig.focus_is_solid(world) {
+        return false;
+    }
+    let candidate = rig.focus;
+    let attempts = [
+        Vec3::new(candidate.x, previous.y, previous.z),
+        Vec3::new(previous.x, candidate.y, previous.z),
+        Vec3::new(previous.x, previous.y, candidate.z),
+        previous,
+    ];
+    for focus in attempts {
+        rig.focus = focus;
+        rig.clamp_all();
+        if !rig.focus_is_solid(world) {
+            return true;
+        }
+    }
+    rig.recover_focus_to_air(world);
+    true
+}
+
 /// 相机控制：读取键鼠输入更新 rig（仅 Ready 且未锁定）。
 pub fn camera_input_system(
     mut rig: ResMut<CameraRigRes>,
+    world: Res<WorldRes>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
 ) {
+    let Some(world) = world.0.as_ref() else {
+        return;
+    };
     let rig = &mut rig.0;
     if rig.control_locked {
         return;
@@ -178,7 +226,8 @@ pub fn camera_input_system(
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let speed = (rig.target_dist * 0.9).max(6.0) * if shift { 3.0 } else { 1.0 };
 
-    // 平移（相机朝向相对，水平面内）。
+    // 平移（相机朝向相对，水平面内）+ 垂直升降聚合为一个候选位移，
+    // 经统一的交互安全函数应用：实体阻挡时按轴滑动，绝不进入实体。
     let fwd = Vec3::new(rig.yaw.sin(), 0.0, rig.yaw.cos());
     let right = Vec3::new(fwd.z, 0.0, -fwd.x);
     let mut move_delta = Vec3::ZERO;
@@ -195,13 +244,14 @@ pub fn camera_input_system(
         move_delta -= right;
     }
     if keys.pressed(KeyCode::KeyR) {
-        rig.focus.y += speed * dt;
+        move_delta.y += 1.0;
     }
     if keys.pressed(KeyCode::KeyF) {
-        rig.focus.y -= speed * dt;
+        move_delta.y -= 1.0;
     }
     if move_delta.length_squared() > 0.0 {
-        rig.focus += move_delta.normalize() * speed * dt;
+        let delta = move_delta.normalize() * speed * dt;
+        apply_interactive_focus_delta(rig, world, delta);
     }
 
     // 旋转：Q/E 或鼠标左拖。
@@ -215,12 +265,11 @@ pub fn camera_input_system(
         rig.yaw += motion.delta.x * 0.005;
         rig.pitch += motion.delta.y * 0.005;
     }
-    // 平移：鼠标右拖。
+    // 平移：鼠标右拖（同样走交互安全函数）。
     if mouse.pressed(MouseButton::Right) {
         let pan = rig.target_dist * 0.0016;
-        rig.focus -= right * motion.delta.x * pan;
-        // 前向拖动沿视线上投影的水平分量
-        rig.focus -= fwd * motion.delta.y * pan;
+        let delta = -right * motion.delta.x * pan - fwd * motion.delta.y * pan;
+        apply_interactive_focus_delta(rig, world, delta);
     }
 
     // 缩放：滚轮。
@@ -246,9 +295,9 @@ pub fn camera_solve_system(
     };
     let rig = &mut rig.0;
     let dt = time.delta_secs().min(0.1);
-    // 焦点入实体纠正必须先于碰撞钳制：DDA 起点（焦点）必须已在空气中，
-    // 普通键鼠控制横穿山体时焦点贴地滑行而非钻入地形。
-    rig.resolve_focus_out_of_solid(world);
+    // 相机求解前再次保证焦点在空气中（历史非法状态的最终防线）：
+    // 焦点纠错必须先于碰撞钳制，DDA 起点（焦点）必须已在空气中。
+    rig.recover_focus_to_air(world);
     let clamped = rig.collision_clamped_dist(world);
     // 平滑只作用于"放宽"方向：先向用户目标距离收敛，再被碰撞上限硬性钳住。
     // 收缩即时（防穿模优先，消除平滑超前导致的瞬态入模）；clamped 由几何决定、
@@ -435,7 +484,7 @@ mod tests {
             0.9,
             30.0,
         );
-        rig.resolve_focus_out_of_solid(&world);
+        rig.recover_focus_to_air(&world);
         assert!(
             (rig.focus.y - 30.3).abs() < 1e-4,
             "焦点应抬升到顶面 30 + 间隙 0.3，实际 {}",
@@ -446,7 +495,7 @@ mod tests {
             rig.focus.y.floor() as i32,
             rig.focus.z.floor() as i32,
         );
-        assert!(!world.voxel(v).is_solid(), "纠正后焦点 {v:?} 不得在实体内");
+        assert!(!world.voxel(v).is_solid(), "恢复后焦点 {v:?} 不得在实体内");
     }
 
     /// 洞穴机位：焦点在山体内部的空气格（四周皆实体）不得被抬升。
@@ -472,7 +521,7 @@ mod tests {
             PITCH_MIN,
             1.5,
         );
-        rig.resolve_focus_out_of_solid(&world);
+        rig.recover_focus_to_air(&world);
         assert!(
             (rig.focus.y - 11.5).abs() < 1e-6,
             "洞穴空气格中的焦点不得被移动，实际 {}",
@@ -491,7 +540,7 @@ mod tests {
             0.9,
             20.0,
         );
-        rig.resolve_focus_out_of_solid(&world);
+        rig.recover_focus_to_air(&world);
         assert!((rig.focus.y - 6.3).abs() < 1e-6);
     }
 
@@ -519,7 +568,7 @@ mod tests {
         for i in 0..=40 {
             rig.focus.x = 4.0 + i as f32 * 0.5;
             rig.focus.y = 6.0;
-            rig.resolve_focus_out_of_solid(&world);
+            rig.recover_focus_to_air(&world);
             let v = IVec3::new(
                 rig.focus.x.floor() as i32,
                 rig.focus.y.floor() as i32,
@@ -527,8 +576,75 @@ mod tests {
             );
             assert!(
                 !world.voxel(v).is_solid(),
-                "步 {i}：纠正后焦点 {v:?} 仍在实体内"
+                "步 {i}：恢复后焦点 {v:?} 仍在实体内"
             );
         }
+    }
+
+    /// 普通交互移动（统一入口）向实体墙推进：候选被阻挡时按轴滑动，
+    /// 焦点在任何步都不进入实体（斜向抵墙时沿墙滑行而非锁死）。
+    #[test]
+    fn interactive_move_toward_wall_slides_not_enters() {
+        let mut solid = Vec::new();
+        // x=10..16、y=0..20、z=8..14 的实体墙。
+        for y in 0..20 {
+            for z in 8..14 {
+                for x in 10..16 {
+                    solid.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(7.0, 6.5, 10.5),
+            0.8,
+            0.9,
+            12.0,
+        );
+        // 斜向（+x 朝墙 + z 横移）连续推进 30 步。
+        for i in 0..30 {
+            let delta = Vec3::new(0.4, 0.0, 0.15);
+            apply_interactive_focus_delta(&mut rig, &world, delta);
+            let v = rig.focus_voxel();
+            assert!(
+                !world.voxel(v).is_solid(),
+                "步 {i}：交互移动后焦点 {v:?} 在实体内"
+            );
+        }
+        assert!(
+            rig.focus.x > 8.0,
+            "沿墙滑动应推进焦点而非完全锁死，实际 x={}",
+            rig.focus.x
+        );
+    }
+
+    /// 从空气格直接冲向相邻实体格（交互探针模式）：移动被修正，
+    /// 焦点保持在空气，收缩后的眼位同样不得在实体内。
+    #[test]
+    fn interactive_move_into_adjacent_solid_is_corrected() {
+        let world = world_with(&[IVec3::new(11, 6, 11)]);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            World::voxel_center(IVec3::new(10, 6, 11)),
+            0.8,
+            PITCH_MIN,
+            12.0,
+        );
+        let corrected = apply_interactive_focus_delta(&mut rig, &world, Vec3::new(1.05, 0.0, 0.0));
+        assert!(corrected, "冲入实体格的移动应被修正");
+        assert!(!rig.focus_is_solid(&world), "修正后焦点不得在实体内");
+        let clamped = rig.collision_clamped_dist(&world);
+        rig.dist = rig.dist.min(clamped);
+        let eye = rig.eye();
+        let ev = IVec3::new(
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        );
+        assert!(
+            !world.size.contains(ev) || !world.voxel(ev).is_solid(),
+            "收缩后眼位 {ev:?} 不得在实体内"
+        );
     }
 }

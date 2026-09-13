@@ -3,7 +3,7 @@
 #
 # 用法：bash scripts/acceptance.sh [证据目录]
 # 默认证据目录 evidence_<timestamp>。流程：
-#   0. 前置守卫：工作区干净（未提交改动即失败）并记录完整提交 SHA；
+#   0. 前置守卫：工作区/暂存区干净（未提交改动即失败）并记录完整提交 SHA；
 #      证据目录必须全新（已存在非空目录立即失败，禁止复用旧截图）
 #   1. cargo fmt --check
 #   2. cargo clippy --all-targets -D warnings
@@ -14,22 +14,38 @@
 #   7. 机器信息（machine.txt + commit.txt）
 #   8. 运行 --acceptance 模式（脚本相机巡航 + 截图 + 指标 + 自动判定，
 #      约 11 分钟；带总超时 watchdog，卡死自动失败并留下报告）
-#   9. 日志错误扫描（panic / ERROR / FATAL / 持续重复错误）
+#   9. 证据完整性检查（report.json 必须存在）
+#  10. 日志错误扫描（panic / ERROR / FATAL / 持续重复错误）
+#  11. 生成全证据 SHA-256 清单（SHA256SUMS.txt）并打包 ZIP
 # 结果写入 <证据目录>/build_checks.json（供应用内 A01 判定读取）与
-# <证据目录>/report.json / report.md；任何一步失败都以非零码退出。
+# <证据目录>/report.json / report.md；任何一步失败都以非零码退出，
+# 失败路径同样尽量留下日志、退出状态与部分校验清单。
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EVIDENCE_DIR="${1:-evidence_$(date +%Y%m%d_%H%M%S)}"
+# 总超时（秒）：默认 900s，明显大于正常 10-11 分钟巡航，可用环境变量覆盖。
+WATCHDOG_SEC="${ACCEPTANCE_WATCHDOG_SEC:-900}"
 
 now_s() { date +%s; }
 T_START=$(now_s)
 
 step() { printf '\n===== %s =====\n' "$1"; }
 
+# 失败/退出时的收尾：尽量留下部分校验清单（成功路径的完整清单在末尾生成）。
+on_exit() {
+  local code=$?
+  if [ "$code" -ne 0 ] && [ -d "$EVIDENCE_DIR" ]; then
+    printf '%s\n' "$code" > "$EVIDENCE_DIR/last_exit_code.txt" 2>/dev/null || true
+    find "$EVIDENCE_DIR" -type f -print0 2>/dev/null \
+      | xargs -0 sha256sum > "$EVIDENCE_DIR/SHA256SUMS.partial.txt" 2>/dev/null || true
+  fi
+}
+trap on_exit EXIT
+
 # ---------------------------------------------------------------------------
-step "前置守卫 1/2：工作区必须干净"
+step "前置守卫 1/2：工作区与暂存区必须干净"
 if [ -n "$(git status --porcelain)" ]; then
   echo "失败：工作区存在未提交改动，验收必须针对干净工作区运行。" >&2
   git status --porcelain >&2
@@ -46,8 +62,6 @@ if [ -e "$EVIDENCE_DIR" ] && [ -n "$(ls -A "$EVIDENCE_DIR" 2>/dev/null)" ]; then
 fi
 mkdir -p "$EVIDENCE_DIR"
 printf '%s\n' "$GIT_SHA" > "$EVIDENCE_DIR/commit.txt"
-
-# Windows (Git Bash) 与 Unix 通用的时间统计。
 
 # ---------------------------------------------------------------------------
 step "A01-1/6 cargo fmt --check"
@@ -79,8 +93,13 @@ BUILD_OK=true
 
 # ---------------------------------------------------------------------------
 step "机器信息"
+CPU_NAME=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" 2>/dev/null \
+  | tr -d '\r' | head -1)
+[ -z "$CPU_NAME" ] && CPU_NAME=$(wmic cpu get name 2>/dev/null | tr -d '\r' | sed -n 2p)
+[ -z "$CPU_NAME" ] && CPU_NAME="$(uname -p)"
 {
   echo "os: $(uname -s -m -r)"
+  echo "cpu: $CPU_NAME"
   echo "rustc: $(rustc --version)"
   echo "cargo: $(cargo --version)"
   echo "date: $(date -Iseconds)"
@@ -88,7 +107,7 @@ step "机器信息"
   echo "git_head: $GIT_SHA"
   echo "evidence_dir: $EVIDENCE_DIR"
 } | tee "$EVIDENCE_DIR/machine.txt"
-# GPU/驱动/图形后端/窗口模式/完整命令行由应用在 Ready 时写入 machine.json。
+# 完整命令行由应用写入 machine.json（command_line 字段）。
 
 # 写 build_checks.json（应用内 A01 判定读取）。
 cat > "$EVIDENCE_DIR/build_checks.json" <<EOF
@@ -104,8 +123,6 @@ EOF
 step "A01-6/6 运行验收巡航（--acceptance，预计约 11 分钟，带 watchdog）"
 BIN="target/release/craftsman_fortress"
 [ -x "$BIN.exe" ] && BIN="$BIN.exe"
-# 应用侧时间线 628s + 启动窗口/收尾 GIF 组装余量 => 总超时 900s。
-WATCHDOG_SEC=900
 "$BIN" --acceptance --evidence "$EVIDENCE_DIR" \
   > "$EVIDENCE_DIR/app_stdout.log" 2>&1 &
 APP_PID=$!
@@ -144,6 +161,16 @@ wait "$APP_PID" || EXIT=$?
 tail -n 30 "$EVIDENCE_DIR/app_stdout.log"
 
 # ---------------------------------------------------------------------------
+step "证据完整性检查"
+for f in report.json report.md metrics.csv; do
+  if [ ! -s "$EVIDENCE_DIR/$f" ]; then
+    echo "失败：证据缺失 $EVIDENCE_DIR/$f（应用异常终止或未完成判定）。" >&2
+    exit 1
+  fi
+done
+echo "report.json / report.md / metrics.csv 齐备。"
+
+# ---------------------------------------------------------------------------
 step "日志错误扫描（panic / ERROR / FATAL / 持续重复）"
 LOG="$EVIDENCE_DIR/app_stdout.log"
 # 1) panic / FATAL / ERROR：0 容忍（覆盖 "panicked at ..." 与 Bevy 的
@@ -164,12 +191,42 @@ fi
 echo "日志扫描通过（无 panic/ERROR/FATAL，无持续重复输出）。"
 
 # ---------------------------------------------------------------------------
+if [ "$EXIT" -ne 0 ]; then
+  T_END=$(now_s)
+  echo ""
+  echo "===== 验收入口结束（总耗时 $((T_END - T_START))s，应用退出码 $EXIT）=====" >&2
+  echo "验收失败：详见 $EVIDENCE_DIR/report.md" >&2
+  exit "$EXIT"
+fi
+
+# ---------------------------------------------------------------------------
+step "证据校验与打包"
+# 全部证据文件的 SHA-256 清单（清单自身不含自身）。
+find "$EVIDENCE_DIR" -type f ! -name "SHA256SUMS.txt" -print0 \
+  | xargs -0 sha256sum > "$EVIDENCE_DIR/SHA256SUMS.txt"
+rm -f "$EVIDENCE_DIR/SHA256SUMS.partial.txt" "$EVIDENCE_DIR/last_exit_code.txt"
+# ZIP 打包：优先 zip，其次 Windows 自带 bsdtar（-a 按后缀产出 zip），
+# 最后 PowerShell Compress-Archive。
+ZIP_FILE="${EVIDENCE_DIR}.zip"
+rm -f "$ZIP_FILE"
+BSDTAR="/c/Windows/System32/tar.exe"
+if command -v zip > /dev/null 2>&1; then
+  zip -qr "$ZIP_FILE" "$EVIDENCE_DIR"
+elif [ -x "$BSDTAR" ]; then
+  (cd .. && "$BSDTAR" -a -cf "$(basename "$(pwd)")/$ZIP_FILE" "$EVIDENCE_DIR")
+elif command -v powershell > /dev/null 2>&1; then
+  powershell -NoProfile -Command "Compress-Archive -Path '$EVIDENCE_DIR' -DestinationPath '$ZIP_FILE'" \
+    > /dev/null 2>&1
+fi
+if [ -f "$ZIP_FILE" ]; then
+  sha256sum "$ZIP_FILE" >> "$EVIDENCE_DIR/SHA256SUMS.txt"
+  echo "证据包：$ZIP_FILE"
+else
+  echo "警告：ZIP 打包不可用（zip/tar/PowerShell 均失败），仅保留证据目录。" >&2
+fi
+
 T_END=$(now_s)
 echo ""
 echo "===== 验收入口结束（总耗时 $((T_END - T_START))s，应用退出码 $EXIT）====="
 echo "证据目录：$EVIDENCE_DIR"
-if [ "$EXIT" -ne 0 ]; then
-  echo "验收失败：详见 $EVIDENCE_DIR/report.md" >&2
-  exit "$EXIT"
-fi
 echo "A01-A13 运行时判定全部 PASS（A14 需独立 Reviewer 复核）。"

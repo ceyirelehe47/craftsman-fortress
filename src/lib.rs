@@ -16,6 +16,7 @@ pub mod generation;
 pub mod meshing;
 pub mod noise;
 pub mod picking;
+pub mod r1_checks;
 pub mod render;
 pub mod voxel;
 pub mod world;

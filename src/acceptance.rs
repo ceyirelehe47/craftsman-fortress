@@ -49,9 +49,9 @@ const GIF_SIZE: (u32, u32) = (480, 270);
 /// 与帧率无关：脚本平滑运动峰值 ~1 m/帧（240 fps 下 223 m/s 的过渡峰值），
 /// 真跳变/状态错乱是数十米级瞬移；4 m/帧 之间留一个数量级余量。
 const MAX_EYE_STEP: f32 = 4.0;
-/// A07：世界修改停止后，脏队列必须在该时限内清空（秒）。
-const QUEUE_CLEAR_LIMIT: f64 = 5.0;
-/// A07 判定要求观察到的"脏事件波次"下限（TintOn/TintOff/编辑测试各一波）。
+/// A07：停止 Mesh 修改后，队列必须保持连续静默的时长（秒）。
+const QUEUE_QUIET_SECONDS: f64 = 5.0;
+/// A07 判定要求观察到的"Mesh 修改波次"下限（TintOn/TintOff/编辑测试各一波）。
 const QUEUE_BURST_MIN: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
@@ -161,6 +161,8 @@ pub struct AcceptanceState {
     pub entity_samples: Vec<(f64, usize)>,
     /// (t, mesh_assets, materials, chunk_entities, mesh_created, mesh_removed)
     pub resource_samples: Vec<(f64, usize, usize, usize, u64, u64)>,
+    /// Mesh 原地替换计数（与 created/removed 分开记录，1Hz 采样）。
+    pub replaced_samples: Vec<(f64, u64)>,
     pub finite_violations: u32,
     pub clamp_violations: u32,
     pub inside_solid_events: u32,
@@ -186,6 +188,11 @@ pub struct AcceptanceState {
     pub dirty_burst_start: Option<f64>,
     pub burst_count: u32,
     pub max_clear_delay: f64,
+    /// 连续静默窗：dirty==0 且 visible_unready==0 且 Mesh 创建/删除/替换
+    /// 计数无变化（A07 要求至少一次连续 ≥5s）。
+    pub prev_resource_ops: u64,
+    pub quiet_since: Option<f64>,
+    pub max_quiet_streak: f64,
     // 拾取测试
     pub ray_results: Vec<(String, bool, String)>,
     pub highlight_ray: Option<Ray>,
@@ -262,6 +269,7 @@ impl AcceptanceState {
             rss_samples: Vec::new(),
             entity_samples: Vec::new(),
             resource_samples: Vec::new(),
+            replaced_samples: Vec::new(),
             finite_violations: 0,
             clamp_violations: 0,
             inside_solid_events: 0,
@@ -282,6 +290,9 @@ impl AcceptanceState {
             dirty_burst_start: None,
             burst_count: 0,
             max_clear_delay: 0.0,
+            prev_resource_ops: 0,
+            quiet_since: None,
+            max_quiet_streak: 0.0,
             ray_results: Vec::new(),
             highlight_ray: None,
             edit_done: false,
@@ -1021,6 +1032,8 @@ fn acceptance_control(
 
     // 低空普通控制路径（A06 覆盖有效性证据）：统计"脚本焦点位于实体"的
     // 帧数。低空主体段必须真实穿入地形，焦点纠错才被有效演练。
+    // 同时把节流状态告知诊断层：节流阶段的帧时不计入 A13 性能门槛。
+    diag.throttling = seg.throttle_ms > 0;
     if seg.coverage.low_altitude || seg.coverage.cliff_edge || seg.coverage.border_hug {
         let sv = IVec3::new(
             focus.x.floor() as i32,
@@ -1082,7 +1095,7 @@ fn acceptance_control(
                 acc.focus_solid_first = Some(fv);
             }
         }
-        // 脏队列清空计时（A07）：一波"从 0 变正"到"归 0"的时长必须 ≤5s。
+        // 脏队列清空计时（A07）：一波"从 0 变正"到"归 0"的时长（信息项）。
         let dirty_now = world.dirty_count();
         if dirty_now > 0 {
             if acc.prev_dirty == 0 {
@@ -1093,6 +1106,20 @@ fn acceptance_control(
             acc.max_clear_delay = acc.max_clear_delay.max(t - start);
         }
         acc.prev_dirty = dirty_now;
+        // 队列静默窗（A07 主断言）：dirty==0 且 visible_unready==0 且
+        // Mesh 创建/删除/替换计数无变化——连续满足 ≥5s。
+        let resource_ops = stats.mesh_created + stats.mesh_removed + stats.mesh_replaced;
+        let quiet =
+            dirty_now == 0 && diag.visible_unready == 0 && resource_ops == acc.prev_resource_ops;
+        if quiet {
+            match acc.quiet_since {
+                None => acc.quiet_since = Some(t),
+                Some(s) => acc.max_quiet_streak = acc.max_quiet_streak.max(t - s),
+            }
+        } else {
+            acc.quiet_since = None;
+        }
+        acc.prev_resource_ops = resource_ops;
         // 可见未准备（A07）
         if diag.visible_unready > 0 {
             acc.unready_violation_frames += 1;
@@ -1192,6 +1219,7 @@ fn acceptance_control(
                 stats.mesh_created,
                 stats.mesh_removed,
             ));
+            acc.replaced_samples.push((t, stats.mesh_replaced));
         }
     }
 
@@ -1802,64 +1830,14 @@ fn finalize(
 
     // ---- A03 Chunk 独立性与跨界连续 ----
     // 判定语义（两部分，全部要求通过）：
-    // 1) 逐体素直接比较：小探针世界中每个 Chunk"单独生成"与"连同全部邻居
-    //    生成"的体素数据必须逐位一致（生成是 chunk 纯函数，与邻域无关）。
-    //    3 个 seed × 27 Chunk（3³ 世界的全部 Chunk 都处于边界位置）全覆盖。
+    // 1) 三方逐体素等价（r1_checks）：24 个确定性样本 Chunk，直接比较
+    //    "单 Chunk 纯函数生成"、"独立 World 邻域乱序生成"与"正式世界"
+    //    解码后的 BlockId——生成是 chunk 纯函数，与邻域和顺序无关。
     // 2) 跨界列定义检查：真实运行世界中，跨界两侧每列的"实际最高实体"
     //    必须符合纯函数地形定义——等于 clamp 后的 terrain_height，或低于它
     //    且该层为空气（被洞穴合法穿透）。
     let t_a03 = Instant::now();
-    let mut probe_pairs = 0usize;
-    let mut probe_ok = 0usize;
-    let probe_size = crate::coords::WorldSize::new(48, 48, 48);
-    let chunk_vol = crate::coords::CHUNK_VOLUME;
-    for seed_i in 0..3u64 {
-        let probe_params = crate::generation::TerrainParams::new(acc.cfg.seed + seed_i * 7);
-        for cy in 0..3 {
-            for cz in 0..3 {
-                for cx in 0..3 {
-                    let cc = IVec3::new(cx, cy, cz);
-                    let mut solo = World::empty(probe_size, probe_params.clone());
-                    solo.ensure_chunk(cc);
-                    let mut hood = World::empty(probe_size, probe_params.clone());
-                    hood.ensure_chunk(cc);
-                    for dy in -1..=1 {
-                        for dz in -1..=1 {
-                            for dx in -1..=1 {
-                                if (dx, dy, dz) == (0, 0, 0) {
-                                    continue;
-                                }
-                                let ncc = cc + IVec3::new(dx, dy, dz);
-                                // 探针世界边缘的邻居越界：跳过（越界处无
-                                // Chunk 槽位，"邻域生成"只含界内邻居）。
-                                if probe_size.contains_chunk(ncc) {
-                                    hood.ensure_chunk(ncc);
-                                }
-                            }
-                        }
-                    }
-                    probe_pairs += 1;
-                    let origin = crate::coords::chunk_origin(cc);
-                    let mut all_equal = true;
-                    for i in 0..chunk_vol {
-                        let local = crate::coords::index_local(i);
-                        let v = IVec3::new(
-                            origin.x + local.x as i32,
-                            origin.y + local.y as i32,
-                            origin.z + local.z as i32,
-                        );
-                        if solo.voxel(v) != hood.voxel(v) {
-                            all_equal = false;
-                            break;
-                        }
-                    }
-                    if all_equal {
-                        probe_ok += 1;
-                    }
-                }
-            }
-        }
-    }
+    let eq = crate::r1_checks::verify_chunk_equivalence(world, 24);
     let mut border_pairs = 0usize;
     let mut consistent = 0usize;
     let mut srand: u64 = 0xB0AD;
@@ -1889,16 +1867,16 @@ fn finalize(
         }
     }
     let ratio = consistent as f64 / border_pairs.max(1) as f64;
-    let a03 = probe_ok == probe_pairs && ratio >= 0.99;
+    let a03 = eq.passed() && ratio >= 0.99;
     checks.push(Check {
         id: "A03",
         name: "Chunk 独立性与跨界连续",
         pass: a03,
         detail: format!(
-            "逐体素比较（单 Chunk vs 全邻域生成）：{probe_ok}/{probe_pairs} Chunk 逐位一致；跨界列对 {consistent}/{border_pairs} 符合纯函数地形定义（≥99%）（耗时 {:.1}s）",
-            t_a03.elapsed().as_secs_f32()
+            "三方逐体素等价（纯函数/邻域乱序/正式世界）：{}/{} 样本一致（首差异 {:?}）；跨界列对 {consistent}/{border_pairs} 符合纯函数地形定义（≥99%）（耗时 {:.1}s）",
+            eq.matches, eq.samples, eq.first_difference, t_a03.elapsed().as_secs_f32()
         ),
-        evidence: "report.json / cargo test world::tests".into(),
+        evidence: "report.json / cargo test r1_checks".into(),
     });
 
     // ---- A04 地形覆盖 ----
@@ -1956,10 +1934,15 @@ fn finalize(
                 }
             }
         }
-        // 图像有效性：可解码、尺寸等于窗口分辨率、非纯色/全黑/全白。
+        // 图像有效性：可解码、尺寸等于窗口分辨率、亮度与量化颜色统计
+        // 排除全黑/全白/纯色（r1_checks::validate_screenshot）。
         if ok {
-            match validate_image(&p, Some(expect_size)) {
-                Ok(summary) => why = format!("{}B {summary}", stat),
+            match crate::r1_checks::validate_screenshot(&p, expect_size.0, expect_size.1) {
+                Ok(v) if v.is_valid(expect_size) => why = format!("{}B {}", stat, v.summary()),
+                Ok(v) => {
+                    ok = false;
+                    why = format!("{}B 图像统计未达门槛: {}", stat, v.summary());
+                }
                 Err(e) => {
                     ok = false;
                     why = e;
@@ -2042,43 +2025,52 @@ fn finalize(
     });
 
     // ---- A07 渲染准备 ----
-    // 队列清空语义：每波"脏事件从 0 变正"起，到队列归 0 的时长必须
-    // ≤5s（停止修改后 5 秒内队列清空），且必须观察到至少
-    // QUEUE_BURST_MIN 波真实脏事件（判定有数据支撑而非全程无队列）。
+    // 队列静默窗语义：停止全部 Mesh 修改后，至少连续 QUEUE_QUIET_SECONDS
+    // 秒满足 dirty==0、visible_unready==0、无新 Mesh 创建/删除/替换；且
+    // 运行中至少观察到 QUEUE_BURST_MIN 波真实修改（判定有数据支撑）；
+    // 收尾时队列仍为空。
     let dirty_now = world.dirty_count();
     let a07 = acc.unready_violation_frames == 0
         && dirty_now == 0
         && acc.burst_count >= QUEUE_BURST_MIN
-        && acc.max_clear_delay <= QUEUE_CLEAR_LIMIT;
+        && acc.max_quiet_streak >= QUEUE_QUIET_SECONDS;
     checks.push(Check {
         id: "A07",
-        name: "渲染准备（visible-unready=0，队列 ≤5s 清空）",
+        name: "渲染准备（visible-unready=0，队列连续 5s 静默）",
         pass: a07,
         detail: format!(
-            "巡航期间 visible-unready 违规帧={}，脏事件波次={}（≥{QUEUE_BURST_MIN}），最长清空耗时 {:.2}s（≤{QUEUE_CLEAR_LIMIT}s），收尾队列残留={}",
-            acc.unready_violation_frames, acc.burst_count, acc.max_clear_delay, dirty_now
+            "巡航期间 visible-unready 违规帧={}，Mesh 修改波次={}（≥{QUEUE_BURST_MIN}），最长连续静默 {:.1}s（≥{QUEUE_QUIET_SECONDS:.0}s），收尾队列残留={}",
+            acc.unready_violation_frames, acc.burst_count, acc.max_quiet_streak, dirty_now
         ),
         evidence: "metrics.csv".into(),
     });
 
     // ---- A08 相机实体冲突与振荡 ----
     // 门槛（全部为 0）：眼位入实体、焦点入实体（求解层纠正后的实际值）、
-    // 距离不收敛振荡事件。无任何容忍额度。
-    let a08 =
-        acc.inside_solid_events == 0 && acc.focus_solid_events == 0 && acc.oscillation_events == 0;
+    // 距离不收敛振荡事件；另加普通交互焦点探针（与键鼠同一移动函数向
+    // 实体发起移动，焦点/眼位必须安全）。无任何容忍额度。
+    let probe = crate::r1_checks::run_interactive_focus_probe(world);
+    let a08 = acc.inside_solid_events == 0
+        && acc.focus_solid_events == 0
+        && acc.oscillation_events == 0
+        && probe.passed();
     checks.push(Check {
         id: "A08",
-        name: "相机不进入实体（眼位+焦点）/ 无振荡",
+        name: "相机不进入实体（眼位+焦点）/ 无振荡 / 交互探针",
         pass: a08,
         detail: format!(
-            "眼位实体内事件={}（首例 {:?}） 焦点实体内事件={}（首例 {:?}） 距离振荡事件={}",
+            "眼位实体内事件={}（首例 {:?}） 焦点实体内事件={}（首例 {:?}） 距离振荡事件={} 交互探针: checks={} blocked={} failures={}（首败 {:?}）",
             acc.inside_solid_events,
             acc.inside_solid_first,
             acc.focus_solid_events,
             acc.focus_solid_first,
-            acc.oscillation_events
+            acc.oscillation_events,
+            probe.checks,
+            probe.blocked,
+            probe.failures,
+            probe.first_failure
         ),
-        evidence: "metrics.csv".into(),
+        evidence: "metrics.csv / cargo test r1_checks".into(),
     });
 
     // ---- A09 拾取 ----
@@ -2341,10 +2333,12 @@ fn finalize(
     let _ = std::fs::write(acc.dir.join("report.json"), &json);
     // 资源时间序列独立落盘（与 metrics.csv 等价，便于消费方直接读取）。
     {
-        let mut rl =
-            String::from("t_s,mesh_assets,materials,chunk_entities,mesh_created,mesh_removed\n");
-        for (ts, ma, mt, ce, cr, rm) in &acc.resource_samples {
-            rl.push_str(&format!("{ts:.2},{ma},{mt},{ce},{cr},{rm}\n"));
+        let mut rl = String::from(
+            "t_s,mesh_assets,materials,chunk_entities,mesh_created,mesh_replaced,mesh_removed\n",
+        );
+        for (i, (ts, ma, mt, ce, cr, rm)) in acc.resource_samples.iter().enumerate() {
+            let rp = acc.replaced_samples.get(i).map(|(_, r)| *r).unwrap_or(0);
+            rl.push_str(&format!("{ts:.2},{ma},{mt},{ce},{cr},{rp},{rm}\n"));
         }
         let _ = std::fs::write(acc.dir.join("resource_timeline.csv"), rl);
     }
@@ -2402,39 +2396,6 @@ fn chrono_like_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "unknown".into())
-}
-
-/// 基本图像有效性（A04）：可解码、尺寸匹配窗口、像素统计排除
-/// 全黑 / 全白 / 纯色图（渲染全黑事故曾以"文件存在且 >10KB"漏检）。
-fn validate_image(path: &Path, expect_size: Option<(u32, u32)>) -> Result<String, String> {
-    let img = image::open(path).map_err(|e| format!("解码失败: {e}"))?;
-    let (w, h) = (img.width(), img.height());
-    if let Some((ew, eh)) = expect_size {
-        if (w, h) != (ew, eh) {
-            return Err(format!("尺寸 {w}x{h} 与窗口 {ew}x{eh} 不符"));
-        }
-    }
-    let rgba = img.to_rgba8();
-    let n = (rgba.len() / 4) as f64;
-    let mut sum = 0f64;
-    let mut sum2 = 0f64;
-    for px in rgba.pixels() {
-        let l = 0.2126 * px[0] as f64 + 0.7152 * px[1] as f64 + 0.0722 * px[2] as f64;
-        sum += l;
-        sum2 += l * l;
-    }
-    let mean = sum / n;
-    let stddev = ((sum2 / n).max(0.0) - mean * mean).sqrt();
-    if mean < 1.0 {
-        return Err(format!("图像接近全黑（平均亮度 {mean:.2}）"));
-    }
-    if mean > 254.0 {
-        return Err(format!("图像接近全白（平均亮度 {mean:.2}）"));
-    }
-    if stddev < 1.0 {
-        return Err(format!("图像接近纯色（亮度标准差 {stddev:.2}）"));
-    }
-    Ok(format!("{w}x{h} 亮度均值 {mean:.1} 标准差 {stddev:.1}"))
 }
 
 /// 把 gif_frames/*.png 组装为巡航 GIF（"录像"证据；无 ffmpeg 环境的替代方案）。

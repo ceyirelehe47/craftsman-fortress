@@ -2,3 +2,5 @@ target/
 evidence/
 evidence_*/
 *.log
+
+evidence_*.zip

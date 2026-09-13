@@ -149,3 +149,17 @@
   （测量有效性守卫，非场景豁免）；验收入口日志扫描正则 `panicked` 漏检 Bevy
   的 "Encountered a panic in system" 形态——放宽为 `panic`。另：旧名扫描器
   首轮曾命中脚本自身的禁用词定义行（扫描器自匹配），脚本自身入白名单。
+- **对任务包补丁的等价移植（第三轮补齐）**：新增 `src/r1_checks.rs` 可复用检查
+  模块——A03 三方逐体素等价（单 Chunk 纯函数 / 独立 World 邻域乱序生成 /
+  正式世界，24 个确定性样本）、A08 普通交互焦点探针（与键鼠同一移动函数向
+  实体发起斜向移动，checks≥8 且 blocked≥8 且 failures=0）、A04 截图有效性
+  （分辨率/亮度均值与标准差/量化颜色 ≥64）；相机新增 `apply_interactive_focus_delta`
+  统一交互移动入口（实体阻挡时按轴滑动或回退，历史非法再由
+  `recover_focus_to_air` 向上恢复），键鼠平移/升降/拖动全部改走该入口，
+  求解层保留最终空气检查；A07 改为"停止修改后连续 5 秒队列静默"
+  （dirty==0 且 visible_unready==0 且 Mesh 创建/删除/替换计数无变化）；
+  A10 节流阶段（约 30 FPS）帧时经 `DiagState::throttling` 排除出 A13
+  性能门槛；验收入口补齐 CPU 型号记录、report.json 证据完整性检查、
+  可覆盖的总超时（ACCEPTANCE_WATCHDOG_SEC）、全证据 SHA256SUMS.txt 与
+  ZIP 打包（Windows bsdtar/zip/PowerShell 三级回退），失败路径经 trap
+  留下退出码与部分校验清单。
