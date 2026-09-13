@@ -41,3 +41,6 @@ jobs:
 
       - name: Shell 脚本语法
         run: bash -n scripts/*.sh
+
+      - name: R2 headless save roundtrip
+        run: cargo run --release --example r2_roundtrip -- /tmp/craftsman-r2-ci

@@ -1,31 +1,28 @@
-//! 启动配置（Seed、世界尺寸、必要调试开关）。
+//! 启动配置（Seed、世界尺寸、存档路径与必要调试开关）。
 //!
-//! 参数形式（决策记录 D-06）：`--key value` 形式的手写解析，不引入 clap。
-//! 交互运行：`craftsman-fortress [--seed N] [--size X Y Z] [--window W H] [--tint]`
+//! 参数形式：`--key value` 手写解析，不引入 clap。
+//! 交互运行：`craftsman-fortress [--seed N] [--size X Y Z] [--save PATH] [--load PATH]`
 //! 验收运行：`craftsman-fortress --acceptance [--evidence DIR]`
 
 use crate::coords::WorldSize;
 
-/// 默认验收 Seed（特征探测回归测试 `acceptance_seed_has_all_features` 保证其地形齐备）。
-/// 2026-09-13 参数修订（山体掩码/洞口探测）后经 feature_scan 全量扫描选定：
-/// 该 seed 八类特征齐备且余量最大（峰 115m、高差 112m、洞口贯穿 -7m）。
 pub const DEFAULT_SEED: u64 = 12345;
-/// 默认世界尺寸（体素）：256 × 128 × 256（验证规模下限）。
 pub const DEFAULT_SIZE: WorldSize = WorldSize::new(256, 128, 256);
-/// 验收窗口分辨率（固定，性能门槛 A13 的声明条件）。
 pub const ACCEPTANCE_WINDOW: [f32; 2] = [1280.0, 720.0];
+pub const DEFAULT_SAVE_PATH: &str = "saves/quicksave.cfsv";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub seed: u64,
     pub size: WorldSize,
     pub window: [f32; 2],
-    /// 验收模式：脚本巡航 + 证据输出 + 自动判定。
     pub acceptance: bool,
-    /// 证据目录（验收模式）。
     pub evidence_dir: String,
-    /// 启动即开启 Chunk 边界调试着色（交互模式 F3 可切换）。
     pub tint_debug: bool,
+    /// 双槽存档的逻辑路径；实际文件为 `<path>.slot0/.slot1`。
+    pub save_path: String,
+    /// 启动时加载的逻辑路径。加载成功后 seed/size 以存档为准。
+    pub load_path: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -37,16 +34,18 @@ impl Default for AppConfig {
             acceptance: false,
             evidence_dir: "evidence".into(),
             tint_debug: false,
+            save_path: DEFAULT_SAVE_PATH.into(),
+            load_path: None,
         }
     }
 }
 
 impl AppConfig {
-    /// 解析命令行参数。非法输入打印用法并以 `Err` 返回。
     pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
         let mut cfg = AppConfig::default();
         let args: Vec<String> = args.into_iter().collect();
         let mut i = 0;
+        let mut save_explicit = false;
         fn next_at(args: &[String], i: &mut usize, name: &str) -> Result<String, String> {
             *i += 1;
             args.get(*i)
@@ -84,15 +83,14 @@ impl AppConfig {
                     }
                     cfg.window = [w, h];
                 }
-                "--acceptance" => {
-                    cfg.acceptance = true;
+                "--acceptance" => cfg.acceptance = true,
+                "--evidence" => cfg.evidence_dir = next_at(&args, &mut i, "--evidence")?,
+                "--tint" => cfg.tint_debug = true,
+                "--save" => {
+                    cfg.save_path = next_at(&args, &mut i, "--save")?;
+                    save_explicit = true;
                 }
-                "--evidence" => {
-                    cfg.evidence_dir = next_at(&args, &mut i, "--evidence")?;
-                }
-                "--tint" => {
-                    cfg.tint_debug = true;
-                }
+                "--load" => cfg.load_path = Some(next_at(&args, &mut i, "--load")?),
                 "--help" | "-h" => {
                     print_usage();
                     return Err("--help 退出".into());
@@ -100,6 +98,14 @@ impl AppConfig {
                 other => return Err(format!("未知参数: {other}")),
             }
             i += 1;
+        }
+        if cfg.acceptance && cfg.load_path.is_some() {
+            return Err("--acceptance 不允许加载用户存档".into());
+        }
+        if let Some(load) = cfg.load_path.as_ref() {
+            if !save_explicit {
+                cfg.save_path = load.clone();
+            }
         }
         Ok(cfg)
     }
@@ -113,7 +119,6 @@ fn validate_size(x: u32, y: u32, z: u32) -> Result<(), String> {
     if !x.is_multiple_of(CHUNK) || !y.is_multiple_of(CHUNK) || !z.is_multiple_of(CHUNK) {
         return Err("尺寸必须是 16 的整数倍（Chunk 尺寸）".into());
     }
-    // 验收规模下限（256×128×256）；更大尺寸允许但给出提示。
     if x < 256 || z < 256 || y < 128 {
         return Err("尺寸低于验证下限 256×128×256".into());
     }
@@ -130,6 +135,8 @@ fn print_usage() {
          \x20 --seed N          世界种子（默认 {DEFAULT_SEED}）\n\
          \x20 --size X Y Z      世界尺寸（体素，默认 256 128 256）\n\
          \x20 --window W H      窗口分辨率（默认 1280 720）\n\
+         \x20 --save PATH       手动 F5 保存的逻辑路径（默认 {DEFAULT_SAVE_PATH}）\n\
+         \x20 --load PATH       从双槽存档加载；未给 --save 时原路径回写\n\
          \x20 --acceptance      验收模式（脚本巡航 + 证据 + 自动判定）\n\
          \x20 --evidence DIR    证据输出目录（默认 evidence）\n\
          \x20 --tint            启动即开启 Chunk 边界调试着色\n\
@@ -150,6 +157,8 @@ mod tests {
         let cfg = AppConfig::parse(Vec::new()).unwrap();
         assert_eq!(cfg.seed, DEFAULT_SEED);
         assert_eq!(cfg.size, WorldSize::new(256, 128, 256));
+        assert_eq!(cfg.save_path, DEFAULT_SAVE_PATH);
+        assert!(cfg.load_path.is_none());
         assert!(!cfg.acceptance);
     }
 
@@ -163,17 +172,22 @@ mod tests {
     }
 
     #[test]
+    fn load_becomes_default_save_target() {
+        let cfg = AppConfig::parse(args(&["--load", "saves/a.cfsv"])).unwrap();
+        assert_eq!(cfg.load_path.as_deref(), Some("saves/a.cfsv"));
+        assert_eq!(cfg.save_path, "saves/a.cfsv");
+        let cfg =
+            AppConfig::parse(args(&["--load", "saves/a.cfsv", "--save", "saves/b.cfsv"])).unwrap();
+        assert_eq!(cfg.save_path, "saves/b.cfsv");
+    }
+
+    #[test]
     fn parse_rejects_bad() {
         assert!(AppConfig::parse(args(&["--seed", "abc"])).is_err());
-        assert!(
-            AppConfig::parse(args(&["--size", "100", "128", "256"])).is_err(),
-            "尺寸非 16 倍数"
-        );
-        assert!(
-            AppConfig::parse(args(&["--size", "256", "64", "256"])).is_err(),
-            "低于下限"
-        );
+        assert!(AppConfig::parse(args(&["--size", "100", "128", "256"])).is_err());
+        assert!(AppConfig::parse(args(&["--size", "256", "64", "256"])).is_err());
         assert!(AppConfig::parse(args(&["--nope"])).is_err());
-        assert!(AppConfig::parse(args(&["--seed"])).is_err(), "缺值");
+        assert!(AppConfig::parse(args(&["--seed"])).is_err());
+        assert!(AppConfig::parse(args(&["--acceptance", "--load", "x"])).is_err());
     }
 }

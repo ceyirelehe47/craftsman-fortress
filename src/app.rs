@@ -15,23 +15,51 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::time::Fixed;
 use bevy::window::{PresentMode, WindowResolution};
+use std::path::Path;
 
 pub fn run() -> AppExit {
-    let cfg = AppConfig::parse(std::env::args().skip(1)).unwrap_or_else(|e| {
+    let mut cfg = AppConfig::parse(std::env::args().skip(1)).unwrap_or_else(|e| {
         if !e.contains("--help") {
             eprintln!("参数错误: {e}");
         }
         std::process::exit(2);
     });
     let acceptance = cfg.acceptance;
-    let mut app = App::new();
 
+    let mut loaded_generation = None;
+    let world = if let Some(load_path) = cfg.load_path.clone() {
+        match crate::persistence::load_latest(Path::new(&load_path)) {
+            Ok(loaded) => {
+                cfg.seed = loaded.world.params.seed;
+                cfg.size = loaded.world.size;
+                loaded_generation = Some(loaded.meta.generation);
+                info!(
+                    "加载存档：{} generation={} edits={} hash={:#x}",
+                    loaded.slot_path.display(),
+                    loaded.meta.generation,
+                    loaded.meta.edit_count,
+                    loaded.meta.world_semantic_hash
+                );
+                loaded.world
+            }
+            Err(e) => {
+                eprintln!("存档加载失败（{load_path}）：{e}");
+                std::process::exit(3);
+            }
+        }
+    } else {
+        World::empty(
+            WorldSize::new(cfg.size.x, cfg.size.y, cfg.size.z),
+            TerrainParams::new(cfg.seed),
+        )
+    };
+
+    let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "工匠要塞 · 初版验证构建".into(),
-                    // 0.19 起 WindowResolution::new 接受物理像素（u32）；启动时物理=逻辑。
                     resolution: WindowResolution::new(cfg.window[0] as u32, cfg.window[1] as u32)
                         .with_scale_factor_override(1.0),
                     present_mode: PresentMode::Fifo,
@@ -46,25 +74,18 @@ pub fn run() -> AppExit {
             }),
     );
 
-    // 固定 20 TPS，与渲染帧率分离（固定时间基线）。
     app.insert_resource(Time::<Fixed>::from_hz(diagnostics::TPS));
     app.insert_resource(ClearColor(crate::render::sky_color()));
     app.insert_resource(UiScale(0.85));
-
     app.init_state::<GameState>();
 
-    // 全局资源：配置、世界（空壳，Loading 阶段填充）、拾取。
-    app.insert_resource(crate::camera::WorldRes(Some(World::empty(
-        WorldSize::new(cfg.size.x, cfg.size.y, cfg.size.z),
-        TerrainParams::new(cfg.seed),
-    ))));
+    app.insert_resource(crate::camera::WorldRes(Some(world)));
     app.insert_resource(CurrentPickRes(None));
     app.insert_resource(ScriptedRayRes(None));
     if cfg.tint_debug {
         app.insert_resource(crate::render::DebugTintRes(DebugTint::ChunkParity));
     }
 
-    // 子模块插件。
     render::plugin(&mut app);
     camera::plugin(&mut app);
     diagnostics::plugin(&mut app);
@@ -78,18 +99,29 @@ pub fn run() -> AppExit {
 
     if acceptance {
         app.add_plugins(AcceptancePlugin::new(cfg.clone()));
+    } else {
+        crate::editing::plugin(
+            &mut app,
+            std::path::PathBuf::from(&cfg.save_path),
+            loaded_generation,
+        );
     }
 
     info!(
-        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={}",
-        cfg.seed, cfg.size.x, cfg.size.y, cfg.size.z, cfg.window[0], cfg.window[1], acceptance
+        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={} 存档路径={} 加载={:?}",
+        cfg.seed,
+        cfg.size.x,
+        cfg.size.y,
+        cfg.size.z,
+        cfg.window[0],
+        cfg.window[1],
+        acceptance,
+        cfg.save_path,
+        cfg.load_path
     );
     app.run()
 }
 
-/// 生成 UI：加载进度 + 调试 HUD + 帮助。
-/// 应用内文本一律 ASCII：Bevy 默认字体无 CJK 字形（渲染为方块），
-/// 中文 UI 待正式字体管线（决策记录"文本/字体"）。
 fn spawn_ui_text(mut commands: Commands) {
     commands.spawn((
         Text::new("Initializing..."),
@@ -123,7 +155,7 @@ fn spawn_ui_text(mut commands: Commands) {
     ));
     commands.spawn((
         Text::new(
-            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Shift fast · F3 chunk tint · F12 screenshot",
+            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Shift fast · Delete remove · B place Stone · F5 save · F3 chunk tint · F12 screenshot",
         ),
         TextFont {
             font_size: FontSize::Px(13.0),
@@ -139,7 +171,6 @@ fn spawn_ui_text(mut commands: Commands) {
     ));
 }
 
-/// Ready 进入时隐藏加载文本。
 fn hide_loading_text(mut commands: Commands, query: Query<Entity, With<LoadingText>>) {
     if let Ok(entity) = query.single() {
         commands.entity(entity).despawn();
