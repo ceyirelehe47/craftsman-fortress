@@ -78,7 +78,7 @@ Reviewer 用 Python 对自己证据目录的槽文件与 metrics.csv 独立计�
 
 ## 6. 非阻断观察项
 
-1. **r2_roundtrip report.json 的 checks ID 与任务书编号错位**：程序报告把双槽原子保存标为 B05、精确往返 B06、损坏回退 B07、槽位修复 B08，而任务书 B05–B10 分别对应格式严格性/精确往返/顺序独立/双槽轮换/损坏回退/槽位修复。行为断言本身全部存在且两轮通过（本表第 3 节按任务书 ID 逐项标注实际依据），仅自述标签偏移；不影响任何门槛判定。
+1. **r2_roundtrip report.json 的 checks ID 与 R2 验收门槛编号错位**：程序报告把双槽原子保存标为 B05、精确往返 B06、损坏回退 B07、槽位修复 B08，而 R2 验收门槛 B05–B10 分别对应格式严格性/精确往返/顺序独立/双槽轮换/损坏回退/槽位修复。行为断言本身全部存在且两轮通过（本表第 3 节按验收门槛 ID 逐项标注实际依据），仅自述标签偏移；不影响任何门槛判定。
 2. **`cargo fmt` 是参考补丁唯一修正**：补丁未在本机制包环境编译过（PATCH_VALIDATION 已声明），实际仅 `examples/r2_roundtrip.rs` 三处换行与 rustfmt 期望不符，无逻辑修改；clippy/test/release 在补丁应用后一次通过。
 3. **CI 触发路径**：`ci.yml` 仅在 push main 与 pull_request 触发，S 通过 PR #1（head=S）获得 CI 证据后以 merge commit 合入 main；两轮验收入口自身完整重跑 fmt/clippy/test/build，与 CI 等效。
 
