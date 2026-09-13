@@ -2,7 +2,7 @@
 //!
 //! 用法：cargo run --release --example feature_scan -- [seed ...]
 //! 对每个 seed 用当前 `TerrainParams::new` 生成 256×128×256 世界并输出特征探测摘要。
-//! 用于为"固定验收世界预设"选择参数/seed（任务书 4.3：不依赖人工反复换 Seed）。
+//! 用于为"固定验收世界预设"选择参数/seed（不依赖人工反复换 Seed）。
 
 use craftsman_fortress::coords::WorldSize;
 use craftsman_fortress::features::probe_world;

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      # Bevy 在 Linux 构建需要 ALSA 与 udev 开发头文件。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --release
+        run: cargo test --release
+
+      - name: Bevy 版本审计（仅 0.19 系列）
+        run: bash scripts/audit_bevy.sh
+
+      - name: 旧名称扫描
+        run: bash scripts/check_naming.sh

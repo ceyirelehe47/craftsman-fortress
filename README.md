@@ -1,6 +1,6 @@
-# 工匠要塞：机械纪元（暂名）· 初版验证构建
+# 工匠要塞 · 初版验证构建
 
-任务书 V0.2 切片的可运行产物：**底层框架 + 确定性世界生成 + 自由透视视角**。
+验证构建产物：**底层框架 + 确定性世界生成 + 自由透视视角**。
 技术基线：Rust + Bevy **0.19.1** + ECS；1 m 三维体素；Chunk 数据与 ECS 独立对象分离。
 
 ## 环境要求
@@ -49,12 +49,14 @@ bash scripts/acceptance.sh          # 完整验收，约 12-15 分钟
 bash scripts/acceptance.sh my_dir   # 指定证据目录
 ```
 
-一次调用依次完成（任务书 5.1）：
-`cargo fmt --check` → `clippy -D warnings` → 依赖版本审计（bevy 全家必须 0.19.x）→ `cargo test --release` → Release 构建 → `--acceptance` 模式运行（8 个固定机位截图、120 s 指标巡航、单体素编辑重建、拾取断言、10 分钟耐久、GIF 录像）。
+一次调用依次完成：
+`cargo fmt --check` → `clippy -D warnings` → 依赖版本审计（bevy 全家必须 0.19.x）→ 旧名称扫描 → `cargo test --release` → Release 构建 → `--acceptance` 模式运行（8 个固定机位截图、120 s 指标巡航、单体素编辑重建、拾取断言、低空普通控制路径（横穿山体/悬崖/边界，无脚本贴地保护）、双帧率阶段 TPS 验证、10 分钟耐久、GIF 录像）。
 
 证据目录产物：
 `report.json`（机器可读判定）、`report.md`（人类可读报告）、`metrics.csv`（逐秒指标）、
-`screenshots/*.png`、`cruise_timelapse.gif`、`features.txt`、`build_checks.json`、`machine.txt`、`app_stdout.log`、`panic.txt`（仅 panic 时出现）。
+`resource_timeline.csv`（资源生命周期时间序列）、`screenshots/*.png`、`cruise_timelapse.gif`、`features.txt`、`build_checks.json`、`machine.txt`（OS/工具链）、`machine.json`（GPU/驱动/图形后端/窗口模式/命令行/run_id）、`commit.txt`（验收提交完整 SHA）、`app_stdout.log`、`panic.txt`（仅 panic 时出现）。
+
+入口自身有前置守卫：工作区必须干净（未提交改动即失败）、证据目录必须全新（已存在非空目录即失败）、应用运行有总超时（卡死自动失败并留下 `watchdog.txt`）、运行日志自动扫描 panic/ERROR/FATAL 与持续重复错误。
 
 **退出码 0 = A01–A13 全部 PASS**；A14（独立复核）由 Reviewer 从干净状态重跑本入口出具。
 

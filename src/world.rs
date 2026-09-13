@@ -1,8 +1,8 @@
 //! `World`：验证世界的单一权威数据源。
 //!
-//! - 持有全部 Chunk（CPU 数据全常驻，任务书 3 加载策略允许的简化方案）；
+//! - 持有全部 Chunk（CPU 数据全常驻的加载策略简化方案）；
 //! - 渲染、拾取、生成、测试全部通过 `World::voxel()` 查询，不得另建副本；
-//! - `set_voxel` 提供"单体素修改 + 边界重建触发"（任务书 4.2 扩展性要求）；
+//! - `set_voxel` 提供"单体素修改 + 边界重建触发"；
 //! - 越界语义：`y < 0` 视为实体（基岩底板，避免世界底面渲染/穿透）；
 //!   `y >= H` 与水平越界视为空气（地图边缘呈剖面状可见）。
 
@@ -21,7 +21,7 @@ pub struct ChunkSlot {
     pub generated: bool,
 }
 
-/// 世界权威对象。非 ECS Resource 驻留（任务书"数据原则"：Chunk 数据与 ECS 独立对象分离）。
+/// 世界权威对象。非 ECS Resource 驻留（数据原则：Chunk 数据与 ECS 独立对象分离）。
 pub struct World {
     pub size: WorldSize,
     pub params: TerrainParams,
@@ -269,6 +269,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::UVec3;
 
     fn small_params() -> TerrainParams {
         let mut p = TerrainParams::new(7);
@@ -280,20 +281,46 @@ mod tests {
     fn voxel_query_crosses_chunk_boundary() {
         let size = WorldSize::new(32, 32, 32);
         let mut w = World::empty(size, small_params());
-        for cc in [
+        let touched = [
             IVec3::new(0, 0, 0),
             IVec3::new(1, 0, 0),
             IVec3::new(0, 0, 1),
             IVec3::new(1, 0, 1),
             IVec3::new(0, 1, 0),
             IVec3::new(1, 1, 1),
-        ] {
+        ];
+        for cc in touched {
             w.ensure_chunk(cc);
         }
-        // 跨界体素两侧都能查询
-        let a = w.voxel(IVec3::new(15, 3, 15));
-        let b = w.voxel(IVec3::new(16, 3, 16));
-        assert!(a.is_solid() || b.is_solid() || true); // 语义查询不 panic 即可
+        // 跨 Chunk 语义断言：World::voxel 的跨界查询必须与
+        // generate_chunk 纯函数的直接输出逐体素一致（含洞穴等任何
+        // 特殊地形——生成函数即权威）。这验证查询被正确路由到正确的
+        // chunk 并返回纯函数结果，而不只是"不 panic"。
+        for cc in touched {
+            let direct = generate_chunk(&w.params, cc, size.y);
+            let origin = IVec3::new(cc.x * 16, cc.y * 16, cc.z * 16);
+            // 抽样 + 全部边界行：局部 (0|15, *, 0|15) 与若干内部点。
+            for local in [
+                UVec3::new(0, 3, 0),
+                UVec3::new(15, 3, 15),
+                UVec3::new(15, 3, 0),
+                UVec3::new(0, 3, 15),
+                UVec3::new(8, 5, 8),
+                UVec3::new(15, 15, 15),
+                UVec3::new(0, 0, 0),
+            ] {
+                let v = IVec3::new(
+                    origin.x + local.x as i32,
+                    origin.y + local.y as i32,
+                    origin.z + local.z as i32,
+                );
+                assert_eq!(
+                    w.voxel(v),
+                    direct.get(local),
+                    "跨界查询 {v:?}（chunk {cc} 局部 {local}）与纯函数生成不一致"
+                );
+            }
+        }
         assert_eq!(w.generated_count(), 6);
     }
 

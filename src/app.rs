@@ -30,7 +30,7 @@ pub fn run() -> AppExit {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "工匠要塞：机械纪元 · 初版验证构建".into(),
+                    title: "工匠要塞 · 初版验证构建".into(),
                     // 0.19 起 WindowResolution::new 接受物理像素（u32）；启动时物理=逻辑。
                     resolution: WindowResolution::new(cfg.window[0] as u32, cfg.window[1] as u32)
                         .with_scale_factor_override(1.0),
@@ -46,7 +46,7 @@ pub fn run() -> AppExit {
             }),
     );
 
-    // 固定 20 TPS，与渲染帧率分离（任务书时间基线）。
+    // 固定 20 TPS，与渲染帧率分离（固定时间基线）。
     app.insert_resource(Time::<Fixed>::from_hz(diagnostics::TPS));
     app.insert_resource(ClearColor(crate::render::sky_color()));
     app.insert_resource(UiScale(0.85));

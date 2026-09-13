@@ -1,4 +1,4 @@
-//! 调度、诊断与可观测性（任务书 4.7）。
+//! 调度、诊断与可观测性。
 //!
 //! - `FixedUpdate` 计数器验证 20 TPS 与渲染帧率分离（A10）；
 //! - 屏幕调试面板报告 Seed、相机/焦点、Chunk 计数、队列、FPS 与帧时间；
@@ -9,8 +9,11 @@
 use crate::app_state::GameState;
 use crate::camera::{CameraRigRes, WorldRes};
 use crate::picking::CurrentPickRes;
-use crate::render::ChunkMeshes;
+use crate::render::{ChunkMeshes, MeshResourceStats};
+use bevy::asset::Assets;
+use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
+use bevy::render::mesh::Mesh;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::time::Instant;
@@ -40,15 +43,18 @@ pub struct DiagState {
     pub rss_mb: f64,
     pub visible_unready: usize,
     sys: Option<sysinfo::System>,
-    /// 运行期错误/警告计数（日志机器信号）。
-    pub error_events: u64,
 }
 
 impl DiagState {
     /// 开启 CSV 输出。
     pub fn open_csv(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         let mut f = std::fs::File::create(path)?;
-        writeln!(f, "t_s,fps,frame_ms_ema,fixed_ticks,meshed,dirty,visible_unready,rss_mb,cam_x,cam_y,cam_z,focus_x,focus_y,focus_z")?;
+        writeln!(
+            f,
+            "t_s,fps,frame_ms_ema,fixed_ticks,meshed,dirty,visible_unready,rss_mb,\
+             cam_x,cam_y,cam_z,focus_x,focus_y,focus_z,\
+             mesh_assets,materials,chunk_entities,mesh_created,mesh_removed"
+        )?;
         self.csv = Some(f);
         Ok(())
     }
@@ -79,6 +85,9 @@ fn diagnostics_update(
     rig: Res<CameraRigRes>,
     registry: Res<ChunkMeshes>,
     pick: Res<CurrentPickRes>,
+    meshes: Res<Assets<Mesh>>,
+    materials: Res<Assets<StandardMaterial>>,
+    stats: Res<MeshResourceStats>,
     mut hud: Query<&mut Text, With<DiagHudText>>,
 ) {
     let dt = time.delta_secs();
@@ -188,7 +197,7 @@ fn diagnostics_update(
             let rig = &rig.0;
             let eye = rig.eye();
             csv_line = Some(format!(
-                "{:.2},{:.2},{:.2},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
+                "{:.2},{:.2},{:.2},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{},{},{},{}",
                 time.elapsed_secs(),
                 diag.fps_ema,
                 1000.0 / diag.fps_ema.max(1e-6),
@@ -202,7 +211,12 @@ fn diagnostics_update(
                 eye.z,
                 rig.focus.x,
                 rig.focus.y,
-                rig.focus.z
+                rig.focus.z,
+                meshes.len(),
+                materials.len(),
+                registry.meshed_count(),
+                stats.mesh_created,
+                stats.mesh_removed
             ));
         }
         if let (Some(csv), Some(line)) = (diag.csv.as_mut(), csv_line) {
@@ -211,7 +225,7 @@ fn diagnostics_update(
     }
 }
 
-/// 目标模拟频率（任务书：固定 20 TPS）。
+/// 目标模拟频率（固定 20 TPS，与渲染帧率分离）。
 pub const TPS: f64 = 20.0;
 /// 观察中心周围的渲染准备半径（米）。
 pub const RENDER_RADIUS: f32 = 190.0;

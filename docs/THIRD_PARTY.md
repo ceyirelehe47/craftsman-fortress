@@ -5,7 +5,7 @@
 
 | crate | 版本约束 | 许可证 | 用途 | Bevy 关系 |
 |---|---|---|---|---|
-| `bevy` | `=0.19.1` | MIT OR Apache-2.0 | 游戏引擎（任务书冻结 0.19 系列） | — |
+| `bevy` | `=0.19.1` | MIT OR Apache-2.0 | 游戏引擎（冻结 0.19 系列） | — |
 | `image` | `0.25`（default-features=false, +png+gif） | MIT OR Apache-2.0 | 验收证据：PNG 截图 / GIF 巡航录像编码 | 版本线与 bevy_image 0.19.1 的 image 依赖一致，由 cargo 统一 |
 | `sysinfo` | `0.33` | MIT | 验收 A12：进程 RSS 采样 | 无关 |
 

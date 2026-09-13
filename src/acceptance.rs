@@ -1,9 +1,10 @@
-//! 验收控制器（任务书第 5 章：单一验收入口的运行时部分）。
+//! 验收控制器：单一验收入口的运行时部分。
 //!
 //! 职责：在 `--acceptance` 模式下接管相机，执行脚本化巡航（固定机位截图 →
-//! 120s 巡航 + 拾取/编辑测试 → 长时耐久循环），全程采样指标，最后执行
-//! 自动判定（A01-A13 的运行时部分），输出机器可读 `report.json` 与人类可读
-//! `report.md` 并以退出码报告结论。A14（独立复核）由外部 Reviewer 完成。
+//! 120s 巡航 + 拾取/编辑测试 → 低空普通控制路径 → 长时耐久循环），全程采样
+//! 指标，最后执行自动判定（A01-A13 的运行时部分），输出机器可读
+//! `report.json` 与人类可读 `report.md` 并以退出码报告结论。A14（独立复核）
+//! 由外部 Reviewer 完成。
 
 use crate::app_state::GameState;
 use crate::camera::{
@@ -14,7 +15,7 @@ use crate::diagnostics::{DiagState, TPS};
 use crate::features::{probe_world, FeatureReport};
 use crate::meshing::DebugTint;
 use crate::picking::{pick_voxel, Ray, ScriptedRayRes};
-use crate::render::{ChunkMeshes, DebugTintRes};
+use crate::render::{ChunkMeshes, DebugTintRes, MeshResourceStats};
 use crate::voxel::BlockId;
 use crate::world::World;
 use bevy::prelude::*;
@@ -30,6 +31,16 @@ const T_CRUISE_START: f64 = 48.0;
 const T_CRUISE_MEASURE_START: f64 = 48.0;
 const T_CRUISE_MEASURE_END: f64 = 168.0;
 const T_GIF_LAST: f64 = 300.0;
+/// 低空普通控制路径起点（横穿山体 / 悬崖 / 边界，无贴地保护）。
+const T_LOW_ALT_START: f64 = 400.0;
+/// 低空路径终点（三组"进入 8s + 主体 20s"）。
+const T_LOW_ALT_END: f64 = 484.0;
+/// A10 第二测量窗口（低空节流段内，避开段边界）。
+const T_LOW_ALT_MEASURE_START: f64 = 410.0;
+const T_LOW_ALT_MEASURE_END: f64 = 478.0;
+/// 低空段渲染帧节流（毫秒/帧）：模拟低性能渲染设备，
+/// 制造与巡航窗口显著不同的渲染帧率（约 60+ fps vs 约 35 fps）。
+const LOW_ALT_THROTTLE_MS: u64 = 20;
 const T_FINALIZE: f64 = 628.0;
 const GIF_INTERVAL: f64 = 4.0;
 /// GIF 帧尺寸。
@@ -38,6 +49,10 @@ const GIF_SIZE: (u32, u32) = (480, 270);
 /// 与帧率无关：脚本平滑运动峰值 ~1 m/帧（240 fps 下 223 m/s 的过渡峰值），
 /// 真跳变/状态错乱是数十米级瞬移；4 m/帧 之间留一个数量级余量。
 const MAX_EYE_STEP: f32 = 4.0;
+/// A07：世界修改停止后，脏队列必须在该时限内清空（秒）。
+const QUEUE_CLEAR_LIMIT: f64 = 5.0;
+/// A07 判定要求观察到的"脏事件波次"下限（TintOn/TintOff/编辑测试各一波）。
+const QUEUE_BURST_MIN: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 struct Pose {
@@ -84,7 +99,10 @@ pub struct Segment {
     coverage: Coverage,
     /// 焦点高度下限（构造段时沿路径预采样地形最高点 +3）。
     /// 段内常量 => 逐帧连续，避免逐帧 max 造成 focus 跳变（A06/A08）。
+    /// 低空测试段置 0：明确禁用该保护，验证求解层的焦点纠错。
     min_focus_y: f32,
+    /// 渲染帧节流（毫秒/帧，0 = 不节流）。A10 第二帧率阶段的实现手段。
+    throttle_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -97,6 +115,12 @@ pub struct Coverage {
     cross_chunk: bool,
     rotate_360: bool,
     border: bool,
+    /// 低空横穿山体（脚本焦点低空直线穿行山体内部，无贴地保护）。
+    low_altitude: bool,
+    /// 低空贴行悬崖。
+    cliff_edge: bool,
+    /// 低空贴行世界边界。
+    border_hug: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +141,11 @@ pub struct ShotLog {
 pub struct AcceptanceState {
     pub cfg: AppConfig,
     pub dir: PathBuf,
+    /// 本次运行的唯一标识（UNIX 秒-pid）。写入 machine.json / report.json，
+    /// 并用于 A04 的"证据属于本次运行"判定。
+    pub run_id: String,
+    /// 状态构造时刻（进程组装期，早于一切截图）——A04 mtime 下界。
+    pub created_at: std::time::SystemTime,
     pub ready_at: Option<Instant>,
     pub features: Option<FeatureReport>,
     pub initial_world_hash: u64,
@@ -127,12 +156,21 @@ pub struct AcceptanceState {
     pub coverage_hits: Vec<Coverage>,
     // 运行时采样
     pub tick_samples: Vec<(f64, u64)>,
+    pub fps_samples: Vec<(f64, f32)>,
     pub rss_samples: Vec<(f64, f64)>,
     pub entity_samples: Vec<(f64, usize)>,
+    /// (t, mesh_assets, materials, chunk_entities, mesh_created, mesh_removed)
+    pub resource_samples: Vec<(f64, usize, usize, usize, u64, u64)>,
     pub finite_violations: u32,
     pub clamp_violations: u32,
     pub inside_solid_events: u32,
     pub inside_solid_first: Option<Vec3>,
+    /// 焦点（求解纠正后的实际值）停留实体的事件数（A08，门槛 0）。
+    pub focus_solid_events: u32,
+    pub focus_solid_first: Option<IVec3>,
+    /// 低空段内"脚本焦点位于实体"的帧数——证明路径真实穿入地形、
+    /// 焦点纠错被真实演练（A06 覆盖有效性证据）。
+    pub low_cross_solid_signal_frames: u32,
     pub unready_violation_frames: u32,
     pub speed_violations: u32,
     pub oscillation_events: u32,
@@ -142,6 +180,11 @@ pub struct AcceptanceState {
     pub last_dist_delta_abs: f32,
     pub osc_run: u32,
     pub last_segment_idx: usize,
+    // 脏队列清空计时（A07）
+    pub prev_dirty: usize,
+    pub dirty_burst_start: Option<f64>,
+    pub burst_count: u32,
+    pub max_clear_delay: f64,
     // 拾取测试
     pub ray_results: Vec<(String, bool, String)>,
     pub highlight_ray: Option<Ray>,
@@ -191,10 +234,20 @@ pub enum ActionId {
 
 impl AcceptanceState {
     pub fn new(cfg: AppConfig, dir: PathBuf) -> Self {
+        let run_id = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            std::process::id()
+        );
         Self {
             panic_flag_path: dir.join("panic.txt"),
             cfg,
             dir,
+            run_id,
+            created_at: std::time::SystemTime::now(),
             ready_at: None,
             features: None,
             initial_world_hash: 0,
@@ -204,12 +257,17 @@ impl AcceptanceState {
             coverage: Coverage::default(),
             coverage_hits: Vec::new(),
             tick_samples: Vec::new(),
+            fps_samples: Vec::new(),
             rss_samples: Vec::new(),
             entity_samples: Vec::new(),
+            resource_samples: Vec::new(),
             finite_violations: 0,
             clamp_violations: 0,
             inside_solid_events: 0,
             inside_solid_first: None,
+            focus_solid_events: 0,
+            focus_solid_first: None,
+            low_cross_solid_signal_frames: 0,
             unready_violation_frames: 0,
             speed_violations: 0,
             oscillation_events: 0,
@@ -219,6 +277,10 @@ impl AcceptanceState {
             last_dist_delta_abs: 0.0,
             osc_run: 0,
             last_segment_idx: 0,
+            prev_dirty: 0,
+            dirty_burst_start: None,
+            burst_count: 0,
+            max_clear_delay: 0.0,
             ray_results: Vec::new(),
             highlight_ray: None,
             edit_done: false,
@@ -255,6 +317,23 @@ impl Plugin for AcceptancePlugin {
         let dir = PathBuf::from(&self.cfg.evidence_dir);
         let _ = std::fs::create_dir_all(dir.join("screenshots"));
         let _ = std::fs::create_dir_all(dir.join("gif_frames"));
+        // 证据目录必须全新（第二道防线，第一道在 scripts/acceptance.sh）：
+        // 目标子目录已有 PNG 说明指向了旧证据目录——复用会让 A04 判定读到
+        // 上一轮的截图，直接 panic 留下机器可读标记并以非零码失败。
+        for sub in ["screenshots", "gif_frames"] {
+            let stale = std::fs::read_dir(dir.join(sub))
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .any(|e| e.path().extension().is_some_and(|x| x == "png"))
+                })
+                .unwrap_or(false);
+            if stale {
+                panic!(
+                    "证据目录非空：{}/ 已存在 PNG（禁止复用旧证据），请更换 --evidence 目录",
+                    dir.join(sub).display()
+                );
+            }
+        }
         // panic 钩子：任何 panic 都留下机器可读标记（A11）。
         let panic_path = dir.join("panic.txt");
         let _ = std::fs::remove_file(&panic_path);
@@ -288,12 +367,14 @@ impl Plugin for AcceptancePlugin {
     }
 }
 
-/// 进入 Ready：探测特征、构建时间线、打开指标输出。
+/// 进入 Ready：探测特征、构建时间线、打开指标输出、落盘机器信息。
 fn acceptance_on_ready(
     mut acc: ResMut<AcceptanceState>,
     mut diag: ResMut<DiagState>,
     world_res: Res<WorldRes>,
     mut rig: ResMut<CameraRigRes>,
+    adapter: Option<Res<bevy::render::renderer::RenderAdapter>>,
+    windows: Query<&Window>,
 ) {
     let world = world_res.world();
     acc.initial_world_hash = world.world_hash();
@@ -308,6 +389,7 @@ fn acceptance_on_ready(
     }
     // 特征报告落盘（A04 证据）。
     let _ = std::fs::write(acc.dir.join("features.txt"), features.summary());
+    write_machine_json(&acc, adapter.as_deref(), windows.iter().next());
 
     // 初始机位：平原视角（热身段）。
     let start = acc
@@ -329,9 +411,73 @@ fn acceptance_on_ready(
     rig.0.control_locked = true;
     acc.ready_at = Some(Instant::now());
     info!(
-        "[验收] Ready：开始脚本巡航（总时长 ~{}s）",
-        T_FINALIZE + 12.0
+        "[验收] Ready：开始脚本巡航（总时长 ~{}s，run_id={}）",
+        T_FINALIZE + 12.0,
+        acc.run_id
     );
+}
+
+/// 机器信息（machine.json）：GPU/驱动/图形后端/窗口模式/完整命令行/run_id。
+/// 脚本侧的 machine.txt（OS/工具链）与本文件互补。
+fn write_machine_json(
+    acc: &AcceptanceState,
+    adapter: Option<&bevy::render::renderer::RenderAdapter>,
+    window: Option<&Window>,
+) {
+    let (gpu_name, gpu_driver, gpu_backend, gpu_vendor, gpu_device) = adapter
+        .map(|a| {
+            let i = a.0.get_info();
+            (
+                i.name.clone(),
+                format!("{} / {}", i.driver, i.driver_info),
+                format!("{:?}", i.backend),
+                format!("{:#x}", i.vendor),
+                format!("{:#x}", i.device),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "unknown".into(),
+                "unknown".into(),
+                "unknown".into(),
+                "?".into(),
+                "?".into(),
+            )
+        });
+    let window_mode = window
+        .map(|w| format!("{:?}", w.mode))
+        .unwrap_or_else(|| "unknown".into());
+    let command_line = std::env::args().collect::<Vec<_>>().join(" ");
+    let json = format!(
+        "{{\n  \"run_id\": \"{}\",\n  \"gpu_name\": \"{}\",\n  \"gpu_driver\": \"{}\",\n  \"gpu_backend\": \"{}\",\n  \"gpu_vendor\": \"{}\",\n  \"gpu_device\": \"{}\",\n  \"window_mode\": \"{}\",\n  \"command_line\": \"{}\",\n  \"git_head\": \"{}\",\n  \"started_at\": \"{}\"\n}}",
+        acc.run_id,
+        json_escape(&gpu_name),
+        json_escape(&gpu_driver),
+        gpu_backend,
+        gpu_vendor,
+        gpu_device,
+        window_mode,
+        json_escape(&command_line),
+        json_escape(&git_head_sha()),
+        chrono_like_now()
+    );
+    let _ = std::fs::write(acc.dir.join("machine.json"), json);
+}
+
+/// 极简 JSON 字符串转义（反斜杠与引号；命令行/驱动信息不含控制字符）。
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// 当前 git HEAD 完整 SHA（全新 clone 工作区必有 .git；失败返回 unknown）。
+fn git_head_sha() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// 构建相机脚本时间线：热身 → 8 个固定机位 → 巡航/耐久循环。
@@ -429,6 +575,7 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
         arc: 0.0,
         coverage: Coverage::default(),
         min_focus_y: path_min_focus_y(world, prev.focus, poses[0].0.focus),
+        throttle_ms: 0,
     });
     for &(pose, shot, cut) in &poses {
         acc.segments.push(Segment {
@@ -444,6 +591,7 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
             } else {
                 path_min_focus_y(world, prev.focus, pose.focus)
             },
+            throttle_ms: 0,
         });
         pose_shots.push((t + 3.5, ActionId::Shot(shot)));
         t += 5.0;
@@ -606,10 +754,10 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
     ];
     let seg_len = 8.0f64;
     let mut lap = 0usize;
-    while t < T_FINALIZE {
+    while t < T_LOW_ALT_START {
         let dist_scale = [1.0f32, 0.75, 1.0, 0.55][lap % 4];
         for (fx, fz, y_off, yaw_d, pitch, dist, cov, arc) in &waypoints {
-            if t >= T_FINALIZE {
+            if t >= T_LOW_ALT_START {
                 break;
             }
             let dist = (dist * dist_scale).clamp(DIST_MIN, DIST_MAX);
@@ -618,29 +766,161 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
             let pose = Pose::surface(focus, prev.yaw + yaw_d, pitch, dist);
             acc.segments.push(Segment {
                 t0: t,
-                t1: (t + seg_len).min(T_FINALIZE),
+                t1: (t + seg_len).min(T_LOW_ALT_START),
                 from: prev,
                 to: pose,
                 cut: false,
                 arc: *arc,
                 coverage: *cov,
                 min_focus_y: path_min_focus_y(world, prev.focus, pose.focus),
+                throttle_ms: 0,
             });
             prev = pose;
             t += seg_len;
         }
         lap += 1;
     }
-    // 收尾静止段：Finalize 前的最后 4s 相机不动（队列清空判定）。
+
+    // ---- 低空普通控制路径（R1 新增）----
+    // 三组"进入段 + 主体段"：横穿山体 / 贴行悬崖 / 贴行世界边界。
+    // 全部段不设置 min_focus_y 贴地保护（= 0）：脚本焦点按低空直线飞行，
+    // 穿入地形的部分完全依赖相机求解层的 resolve_focus_out_of_solid 兜底
+    // ——这是对普通键鼠控制路径的真实修复验证（A06 覆盖 + A08 焦点不变量）。
+    // 段内同时以 LOW_ALT_THROTTLE_MS 主动节流渲染帧，制造与巡航窗口显著
+    // 不同的渲染帧率，供 A10 验证 20 TPS 的独立性。
+    let mtn_center = features
+        .mountains
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(cx as i32, 90, cz as i32));
+    let (mx, mz) = (mtn_center.x, mtn_center.z);
+    let cl_center = features
+        .cliffs
+        .as_ref()
+        .map(|f| f.voxel.unwrap())
+        .unwrap_or(IVec3::new(cx as i32, 60, cz as i32));
+    let (clx, clz) = (cl_center.x, cl_center.z);
+    let approach_y = |x: i32, z: i32| (h(x, z) + 1.5).clamp(4.0, world.size.y as f32 - 8.0);
+    let side_w = 44i32; // 山脚侧向偏移：横穿端点在山体范围之外
+    let bound_x = 12.0f32; // 边界钳制线 bounds.0=8，贴边留 4m
+    let edge_z = 96.0f32.min(world.size.z as f32 - 16.0);
+    type LowLeg = (Vec3, Vec3, Coverage);
+    let low_legs: [LowLeg; 6] = [
+        // 进入横山段：从巡航末机位平滑下降到山脚低空。
+        (
+            prev.focus,
+            Vec3::new((mx - side_w) as f32, approach_y(mx - side_w, mz), mz as f32),
+            Coverage::default(),
+        ),
+        // 主体：低空直线横穿山体（中段脚本焦点位于山体内部）。
+        (
+            Vec3::new((mx - side_w) as f32, approach_y(mx - side_w, mz), mz as f32),
+            Vec3::new((mx + side_w) as f32, approach_y(mx + side_w, mz), mz as f32),
+            Coverage {
+                low_altitude: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+        ),
+        // 进入悬崖段。
+        (
+            Vec3::new((mx + side_w) as f32, approach_y(mx + side_w, mz), mz as f32),
+            Vec3::new((clx - 36) as f32, approach_y(clx - 36, clz), clz as f32),
+            Coverage::default(),
+        ),
+        // 主体：低空贴行悬崖。
+        (
+            Vec3::new((clx - 36) as f32, approach_y(clx - 36, clz), clz as f32),
+            Vec3::new((clx + 36) as f32, approach_y(clx + 36, clz), clz as f32),
+            Coverage {
+                cliff_edge: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+        ),
+        // 进入边界段。
+        (
+            Vec3::new((clx + 36) as f32, approach_y(clx + 36, clz), clz as f32),
+            Vec3::new(bound_x, approach_y(bound_x as i32, 40), 40.0),
+            Coverage::default(),
+        ),
+        // 主体：低空贴行世界边界。
+        (
+            Vec3::new(bound_x, approach_y(bound_x as i32, 40), 40.0),
+            Vec3::new(bound_x, approach_y(bound_x as i32, edge_z as i32), edge_z),
+            Coverage {
+                border_hug: true,
+                border: true,
+                cross_chunk: true,
+                ..Default::default()
+            },
+        ),
+    ];
+    let group_len = (T_LOW_ALT_END - T_LOW_ALT_START) / 3.0; // 28s 每组
+    let enter_len = 8.0f64;
+    let mut lt = T_LOW_ALT_START;
+    for (i, (from, to, cov)) in low_legs.into_iter().enumerate() {
+        let is_enter = i % 2 == 0;
+        let len = if is_enter {
+            enter_len
+        } else {
+            group_len - enter_len
+        };
+        // 第一进入段从巡航末机位完整过渡（yaw/pitch/dist 连续收敛），
+        // 其余段沿用统一的低空位姿参数。
+        let from_pose = if i == 0 {
+            prev
+        } else {
+            Pose::surface(from, 0.9, 0.42, 14.0)
+        };
+        acc.segments.push(Segment {
+            t0: lt,
+            t1: lt + len,
+            from: from_pose,
+            to: Pose::surface(to, 0.9, 0.42, 14.0),
+            cut: false,
+            arc: 0.0,
+            coverage: cov,
+            min_focus_y: 0.0,
+            throttle_ms: LOW_ALT_THROTTLE_MS,
+        });
+        lt += len;
+    }
+    debug_assert!((lt - T_LOW_ALT_END).abs() < 1e-6);
+    // 低空路径有效性自检：横穿山体主体的直线采样必须穿入实体（否则该段
+    // 没有真正演练焦点纠错，A06 的 low_altitude 覆盖将失去意义；
+    // 运行时的 low_cross_solid_signal_frames 是权威判定，此处仅日志提示）。
+    {
+        let (from, to, _) = low_legs[1];
+        let mut solid_samples = 0u32;
+        for i in 0..=16u32 {
+            let u = i as f32 / 16.0;
+            let p = Vec3::new(
+                from.x + (to.x - from.x) * u,
+                from.y + (to.y - from.y) * u,
+                from.z + (to.z - from.z) * u,
+            );
+            let v = IVec3::new(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+            if world.size.contains(v) && world.voxel(v).is_solid() {
+                solid_samples += 1;
+            }
+        }
+        info!("[验收] 低空横山段预检：直线采样 17 点中 {solid_samples} 点位于实体内（应 >0）");
+    }
+
+    // 收尾静止段：Finalize 前相机不动（队列清空判定）。
+    let t_rest = T_LOW_ALT_END;
+    let rest_focus = low_legs[5].1;
     acc.segments.push(Segment {
-        t0: T_FINALIZE - 4.0,
+        t0: t_rest,
         t1: T_FINALIZE + 1e9,
-        from: prev,
-        to: prev,
+        from: Pose::surface(rest_focus, 0.9, 0.42, 14.0),
+        to: Pose::surface(rest_focus, 0.9, 0.42, 14.0),
         cut: false,
         arc: 0.0,
         coverage: Coverage::default(),
-        min_focus_y: path_min_focus_y(world, prev.focus, prev.focus),
+        min_focus_y: 0.0,
+        throttle_ms: 0,
     });
 
     // ---- 时间点动作 ----
@@ -688,6 +968,10 @@ fn acceptance_control(
     mut world_res: ResMut<WorldRes>,
     mut diag: ResMut<DiagState>,
     registry: Res<ChunkMeshes>,
+    meshes: Res<Assets<bevy::render::mesh::Mesh>>,
+    materials: Res<Assets<StandardMaterial>>,
+    stats: Res<MeshResourceStats>,
+    shot_log: Res<ShotLog>,
     mut scripted_ray: ResMut<ScriptedRayRes>,
     mut tint: ResMut<DebugTintRes>,
     next_state: ResMut<NextState<GameState>>,
@@ -734,6 +1018,19 @@ fn acceptance_control(
         focus.y = focus.y.max(seg.min_focus_y);
     }
 
+    // 低空普通控制路径（A06 覆盖有效性证据）：统计"脚本焦点位于实体"的
+    // 帧数。低空主体段必须真实穿入地形，焦点纠错才被有效演练。
+    if seg.coverage.low_altitude || seg.coverage.cliff_edge || seg.coverage.border_hug {
+        let sv = IVec3::new(
+            focus.x.floor() as i32,
+            focus.y.floor() as i32,
+            focus.z.floor() as i32,
+        );
+        if world.size.contains(sv) && world.voxel(sv).is_solid() {
+            acc.low_cross_solid_signal_frames += 1;
+        }
+    }
+
     // ---------- 2. 不变量采样（t >= 热身结束）----------
     // 必须在"位姿应用"之前采样：此时 rig 是本帧求解后的完整状态
     // （位姿 N-1 + 针对该位姿的碰撞钳制距离），眼位即真实渲染相机位置。
@@ -761,7 +1058,7 @@ fn acceptance_control(
             // 实际 dist 允许被碰撞钳制收缩到 0（眼位退到焦点）。
             acc.clamp_violations += 1;
         }
-        // 相机不得在实体内（A08）
+        // 相机不得在实体内（A08）：眼位与焦点（求解纠正后的实际值）双重检查。
         let v = IVec3::new(
             eye.x.floor() as i32,
             eye.y.floor() as i32,
@@ -773,6 +1070,28 @@ fn acceptance_control(
                 acc.inside_solid_first = Some(eye);
             }
         }
+        let fv = IVec3::new(
+            rig.0.focus.x.floor() as i32,
+            rig.0.focus.y.floor() as i32,
+            rig.0.focus.z.floor() as i32,
+        );
+        if world.size.contains(fv) && world.voxel(fv).is_solid() {
+            acc.focus_solid_events += 1;
+            if acc.focus_solid_first.is_none() {
+                acc.focus_solid_first = Some(fv);
+            }
+        }
+        // 脏队列清空计时（A07）：一波"从 0 变正"到"归 0"的时长必须 ≤5s。
+        let dirty_now = world.dirty_count();
+        if dirty_now > 0 {
+            if acc.prev_dirty == 0 {
+                acc.dirty_burst_start = Some(t);
+                acc.burst_count += 1;
+            }
+        } else if let Some(start) = acc.dirty_burst_start.take() {
+            acc.max_clear_delay = acc.max_clear_delay.max(t - start);
+        }
+        acc.prev_dirty = dirty_now;
         // 可见未准备（A07）
         if diag.visible_unready > 0 {
             acc.unready_violation_frames += 1;
@@ -849,7 +1168,7 @@ fn acceptance_control(
             acc.last_dist_delta_abs = delta.abs();
         }
 
-        // 低频采样：ticks / RSS / 实体数（1s 周期）
+        // 低频采样：ticks / FPS / RSS / 实体与资源计数（1s 周期）
         let sample_due = acc
             .last_sample
             .map(|s| s.elapsed().as_secs_f64() >= 1.0)
@@ -857,8 +1176,17 @@ fn acceptance_control(
         if sample_due {
             acc.last_sample = Some(Instant::now());
             acc.tick_samples.push((t, diag.fixed_ticks));
+            acc.fps_samples.push((t, diag.fps_ema));
             acc.rss_samples.push((t, diag.rss_mb));
             acc.entity_samples.push((t, registry.meshed_count()));
+            acc.resource_samples.push((
+                t,
+                meshes.len(),
+                materials.len(),
+                registry.meshed_count(),
+                stats.mesh_created,
+                stats.mesh_removed,
+            ));
         }
     }
 
@@ -904,9 +1232,21 @@ fn acceptance_control(
             world,
             registry.into_inner(),
             diag.into_inner(),
+            &stats,
+            meshes.len(),
+            materials.len(),
+            &shot_log,
             next_state,
             exit,
         );
+        return;
+    }
+
+    // ---------- 6. 渲染帧节流（A10 第二帧率阶段）----------
+    // 在低空段主动增加帧时长，模拟低性能渲染设备。放在系统末尾：
+    // 本帧调度已全部完成，只拉长到下一帧的间隔。
+    if seg.throttle_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(seg.throttle_ms));
     }
 }
 
@@ -1359,8 +1699,12 @@ pub fn save_screenshot(
 fn finalize(
     acc: &mut AcceptanceState,
     world: &World,
-    _registry: &ChunkMeshes,
+    registry: &ChunkMeshes,
     diag: &DiagState,
+    stats: &MeshResourceStats,
+    mesh_assets: usize,
+    material_assets: usize,
+    shot_log: &ShotLog,
     mut next_state: ResMut<NextState<GameState>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -1452,11 +1796,59 @@ fn finalize(
     });
 
     // ---- A03 Chunk 独立性与跨界连续 ----
-    // 判定语义：跨界两侧每列的"实际最高实体"必须符合纯函数地形定义——
-    // 等于 clamp 后的 terrain_height，或低于它且该层为空气（被洞穴合法穿透）。
-    // 两侧都符合 => 边界两侧由同一纯函数独立生成仍逐位一致（悬崖允许任意高差，
-    // "高度相等"不是正确性判据；"符合定义"才是）。独立成块等价性另由单元测试覆盖
-    //（生成哈希与顺序无关）。
+    // 判定语义（两部分，全部要求通过）：
+    // 1) 逐体素直接比较：小探针世界中每个 Chunk"单独生成"与"连同全部邻居
+    //    生成"的体素数据必须逐位一致（生成是 chunk 纯函数，与邻域无关）。
+    //    3 个 seed × 27 Chunk（3³ 世界的全部 Chunk 都处于边界位置）全覆盖。
+    // 2) 跨界列定义检查：真实运行世界中，跨界两侧每列的"实际最高实体"
+    //    必须符合纯函数地形定义——等于 clamp 后的 terrain_height，或低于它
+    //    且该层为空气（被洞穴合法穿透）。
+    let t_a03 = Instant::now();
+    let mut probe_pairs = 0usize;
+    let mut probe_ok = 0usize;
+    let probe_size = crate::coords::WorldSize::new(48, 48, 48);
+    let chunk_vol = crate::coords::CHUNK_VOLUME;
+    for seed_i in 0..3u64 {
+        let probe_params = crate::generation::TerrainParams::new(acc.cfg.seed + seed_i * 7);
+        for cy in 0..3 {
+            for cz in 0..3 {
+                for cx in 0..3 {
+                    let cc = IVec3::new(cx, cy, cz);
+                    let mut solo = World::empty(probe_size, probe_params.clone());
+                    solo.ensure_chunk(cc);
+                    let mut hood = World::empty(probe_size, probe_params.clone());
+                    hood.ensure_chunk(cc);
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            for dx in -1..=1 {
+                                if (dx, dy, dz) != (0, 0, 0) {
+                                    hood.ensure_chunk(cc + IVec3::new(dx, dy, dz));
+                                }
+                            }
+                        }
+                    }
+                    probe_pairs += 1;
+                    let origin = crate::coords::chunk_origin(cc);
+                    let mut all_equal = true;
+                    for i in 0..chunk_vol {
+                        let local = crate::coords::index_local(i);
+                        let v = IVec3::new(
+                            origin.x + local.x as i32,
+                            origin.y + local.y as i32,
+                            origin.z + local.z as i32,
+                        );
+                        if solo.voxel(v) != hood.voxel(v) {
+                            all_equal = false;
+                            break;
+                        }
+                    }
+                    if all_equal {
+                        probe_ok += 1;
+                    }
+                }
+            }
+        }
+    }
     let mut border_pairs = 0usize;
     let mut consistent = 0usize;
     let mut srand: u64 = 0xB0AD;
@@ -1486,16 +1878,23 @@ fn finalize(
         }
     }
     let ratio = consistent as f64 / border_pairs.max(1) as f64;
-    let a03 = ratio >= 0.99;
+    let a03 = probe_ok == probe_pairs && ratio >= 0.99;
     checks.push(Check {
         id: "A03",
         name: "Chunk 独立性与跨界连续",
         pass: a03,
-        detail: format!("跨界列对 {consistent}/{border_pairs} 符合纯函数地形定义（≥99%；两侧独立生成逐位一致的哈希证据见 A02）"),
+        detail: format!(
+            "逐体素比较（单 Chunk vs 全邻域生成）：{probe_ok}/{probe_pairs} Chunk 逐位一致；跨界列对 {consistent}/{border_pairs} 符合纯函数地形定义（≥99%）（耗时 {:.1}s）",
+            t_a03.elapsed().as_secs_f32()
+        ),
         evidence: "report.json / cargo test world::tests".into(),
     });
 
     // ---- A04 地形覆盖 ----
+    // 判定语义（全部要求通过）：
+    // 1) 八类地形特征齐备；
+    // 2) 8 张机位截图存在、属于本次运行（保存记录一致 + mtime 不早于本次
+    //    进程组装时刻）且图像有效（可解码、尺寸正确、非纯色/全黑/全白）。
     let features = acc.features.clone().unwrap_or_default();
     let shots_expected = [
         "A04_01_plains.png",
@@ -1507,17 +1906,59 @@ fn finalize(
         "A04_07_underground_cave.png",
         "A04_08_chunk_boundaries.png",
     ];
+    let expect_size = (acc.cfg.window[0] as u32, acc.cfg.window[1] as u32);
     let mut shot_details = Vec::new();
     let mut shots_ok = true;
     for name in shots_expected {
         let p = acc.dir.join("screenshots").join(name);
         let stat = std::fs::metadata(&p).ok().map(|m| m.len()).unwrap_or(0);
-        let ok = stat > 10_000;
+        let mut ok = stat > 10_000;
+        let mut why = format!("{}B", stat);
+        // 归属检查 1：保存记录（内存中的本次保存结果）必须存在且字节数一致。
+        let logged = shot_log
+            .records
+            .iter()
+            .find(|(n, _, ok, _)| n == name && *ok);
+        match logged {
+            Some((_, _, _, bytes)) if *bytes == stat => {}
+            Some((_, _, _, bytes)) => {
+                ok = false;
+                why = format!("字节数不符：磁盘 {stat}B ≠ 保存记录 {bytes}B");
+            }
+            None => {
+                ok = false;
+                why = "无本次运行的保存记录".into();
+            }
+        }
+        // 归属检查 2：mtime 不得早于本次进程组装时刻（排除复用旧证据）。
+        if ok {
+            match std::fs::metadata(&p).and_then(|m| m.modified()) {
+                Ok(mtime) => {
+                    if mtime < acc.created_at {
+                        ok = false;
+                        why = "mtime 早于本次运行（疑似旧证据）".into();
+                    }
+                }
+                Err(e) => {
+                    ok = false;
+                    why = format!("mtime 不可读: {e}");
+                }
+            }
+        }
+        // 图像有效性：可解码、尺寸等于窗口分辨率、非纯色/全黑/全白。
+        if ok {
+            match validate_image(&p, Some(expect_size)) {
+                Ok(summary) => why = format!("{}B {summary}", stat),
+                Err(e) => {
+                    ok = false;
+                    why = e;
+                }
+            }
+        }
         shots_ok &= ok;
-        shot_details.push(format!("{name}: {}B", stat));
+        shot_details.push(format!("{name}: {why}"));
         if !ok {
-            // 二次机会：等待中的异步截图
-            info!("[验收/A04] 截图偏小或缺失: {name} ({stat}B)");
+            info!("[验收/A04] 截图无效: {name} — {why}");
         }
     }
     let a04 = features.all_present() && shots_ok;
@@ -1526,7 +1967,7 @@ fn finalize(
         name: "地形覆盖（八类特征 + 证据机位）",
         pass: a04,
         detail: format!("{} | 截图: {}", features.summary(), shot_details.join(", ")),
-        evidence: "screenshots/ + features.txt".into(),
+        evidence: "screenshots/ + features.txt + machine.json(run_id)".into(),
     });
 
     // ---- A05 Mesh 正确性（单元测试 + 运行时编辑重建）----
@@ -1554,6 +1995,9 @@ fn finalize(
         cov.cross_chunk |= c.cross_chunk;
         cov.rotate_360 |= c.rotate_360;
         cov.border |= c.border;
+        cov.low_altitude |= c.low_altitude;
+        cov.cliff_edge |= c.cliff_edge;
+        cov.border_hug |= c.border_hug;
     }
     let cov_all = cov.low_angle
         && cov.management
@@ -1562,46 +2006,66 @@ fn finalize(
         && cov.min_zoom
         && cov.cross_chunk
         && cov.rotate_360
-        && cov.border;
+        && cov.border
+        && cov.low_altitude
+        && cov.cliff_edge
+        && cov.border_hug
+        // 低空横山段必须真实穿入过地形（脚本焦点位于实体），否则
+        // 焦点纠错路径没有被有效演练，覆盖判定失去意义。
+        && acc.low_cross_solid_signal_frames > 0;
     let a06 = acc.finite_violations == 0
         && acc.clamp_violations == 0
         && acc.speed_violations == 0
         && cov_all;
     checks.push(Check {
         id: "A06",
-        name: "相机全路径",
+        name: "相机全路径（含低空普通控制路径）",
         pass: a06,
         detail: format!(
-            "NaN/跳变/限位违规: finite={} clamp={} speed={}；覆盖: 低角={} 经营={} 最大高度={} 最大缩放={} 最小缩放={} 跨Chunk={} 360°={} 边界={}",
+            "NaN/跳变/限位违规: finite={} clamp={} speed={}；覆盖: 低角={} 经营={} 最大高度={} 最大缩放={} 最小缩放={} 跨Chunk={} 360°={} 边界={} 低空横山={}（实体信号 {} 帧） 悬崖贴行={} 边界贴行={}",
             acc.finite_violations, acc.clamp_violations, acc.speed_violations,
-            cov.low_angle, cov.management, cov.max_height, cov.max_zoom, cov.min_zoom, cov.cross_chunk, cov.rotate_360, cov.border
+            cov.low_angle, cov.management, cov.max_height, cov.max_zoom, cov.min_zoom, cov.cross_chunk, cov.rotate_360, cov.border,
+            cov.low_altitude, acc.low_cross_solid_signal_frames, cov.cliff_edge, cov.border_hug
         ),
         evidence: "metrics.csv / cruise_timelapse.gif".into(),
     });
 
     // ---- A07 渲染准备 ----
+    // 队列清空语义：每波"脏事件从 0 变正"起，到队列归 0 的时长必须
+    // ≤5s（停止修改后 5 秒内队列清空），且必须观察到至少
+    // QUEUE_BURST_MIN 波真实脏事件（判定有数据支撑而非全程无队列）。
     let dirty_now = world.dirty_count();
-    let a07 = acc.unready_violation_frames == 0 && dirty_now == 0;
+    let a07 = acc.unready_violation_frames == 0
+        && dirty_now == 0
+        && acc.burst_count >= QUEUE_BURST_MIN
+        && acc.max_clear_delay <= QUEUE_CLEAR_LIMIT;
     checks.push(Check {
         id: "A07",
-        name: "渲染准备（visible-unready=0，队列清空）",
+        name: "渲染准备（visible-unready=0，队列 ≤5s 清空）",
         pass: a07,
         detail: format!(
-            "巡航期间 visible-unready 违规帧={}，收尾队列残留={}",
-            acc.unready_violation_frames, dirty_now
+            "巡航期间 visible-unready 违规帧={}，脏事件波次={}（≥{QUEUE_BURST_MIN}），最长清空耗时 {:.2}s（≤{QUEUE_CLEAR_LIMIT}s），收尾队列残留={}",
+            acc.unready_violation_frames, acc.burst_count, acc.max_clear_delay, dirty_now
         ),
         evidence: "metrics.csv".into(),
     });
 
-    // ---- A08 相机实体冲突 ----
-    let a08 = acc.inside_solid_events == 0 && acc.oscillation_events <= 4;
+    // ---- A08 相机实体冲突与振荡 ----
+    // 门槛（全部为 0）：眼位入实体、焦点入实体（求解层纠正后的实际值）、
+    // 距离不收敛振荡事件。无任何容忍额度。
+    let a08 =
+        acc.inside_solid_events == 0 && acc.focus_solid_events == 0 && acc.oscillation_events == 0;
     checks.push(Check {
         id: "A08",
-        name: "相机不进入实体 / 无振荡",
+        name: "相机不进入实体（眼位+焦点）/ 无振荡",
         pass: a08,
         detail: format!(
-            "实体内事件={}（首例 {:?}） 距离符号交替事件={}",
-            acc.inside_solid_events, acc.inside_solid_first, acc.oscillation_events
+            "眼位实体内事件={}（首例 {:?}） 焦点实体内事件={}（首例 {:?}） 距离振荡事件={}",
+            acc.inside_solid_events,
+            acc.inside_solid_first,
+            acc.focus_solid_events,
+            acc.focus_solid_first,
+            acc.oscillation_events
         ),
         evidence: "metrics.csv".into(),
     });
@@ -1625,7 +2089,11 @@ fn finalize(
         evidence: "screenshots/A09_picking_highlight.png".into(),
     });
 
-    // ---- A10 20 TPS 分离 ----
+    // ---- A10 20 TPS 分离（两个不同渲染帧率阶段）----
+    // 阶段 1：正常帧率巡航窗（48-168s）。阶段 2：低空节流窗（410-478s，
+    // 每帧主动 sleep，渲染帧率显著更低）。两阶段固定步速率都必须为
+    // 20±2%，且两阶段实测平均 FPS 必须显著不同（否则"不同帧率阶段"
+    // 前提不成立，判定无效）。
     let tick_at = |t0: f64, t1: f64| -> Option<(f64, f64)> {
         let a = acc
             .tick_samples
@@ -1643,30 +2111,50 @@ fn finalize(
             _ => None,
         }
     };
-    let _a10 = match tick_at(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END) {
-        Some((secs, delta)) => {
-            let rate = delta / secs;
-            let ok = (rate - TPS).abs() / TPS <= 0.02;
-            checks.push(Check {
-                id: "A10",
-                name: "20 TPS 固定步与渲染分离",
-                pass: ok,
-                detail: format!("{secs:.0}s 内固定步 {delta} 次 = {rate:.3} TPS（目标 20 ±2%）"),
-                evidence: "metrics.csv fixed_ticks 列".into(),
-            });
-            ok
-        }
-        None => {
-            checks.push(Check {
-                id: "A10",
-                name: "20 TPS 固定步与渲染分离",
-                pass: false,
-                detail: "采样缺失".into(),
-                evidence: "metrics.csv".into(),
-            });
-            false
+    let fps_mean = |t0: f64, t1: f64| -> Option<f64> {
+        let s: Vec<f32> = acc
+            .fps_samples
+            .iter()
+            .filter(|(ts, _)| *ts >= t0 && *ts <= t1)
+            .map(|(_, f)| *f)
+            .collect();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.iter().map(|f| *f as f64).sum::<f64>() / s.len() as f64)
         }
     };
+    let (a10, a10_detail) = match (
+        tick_at(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END),
+        tick_at(T_LOW_ALT_MEASURE_START, T_LOW_ALT_MEASURE_END),
+        fps_mean(T_CRUISE_MEASURE_START, T_CRUISE_MEASURE_END),
+        fps_mean(T_LOW_ALT_MEASURE_START, T_LOW_ALT_MEASURE_END),
+    ) {
+        (Some((secs1, delta1)), Some((secs2, delta2)), Some(fps1), Some(fps2)) => {
+            let rate1 = delta1 / secs1;
+            let rate2 = delta2 / secs2;
+            let ok1 = (rate1 - TPS).abs() / TPS <= 0.02;
+            let ok2 = (rate2 - TPS).abs() / TPS <= 0.02;
+            // 渲染帧率必须显著不同（节流窗 ≥15% 降幅），否则前提不成立。
+            let fps_sep = fps1 / fps2.max(1.0) >= 1.15;
+            let ok = ok1 && ok2 && fps_sep;
+            (
+                ok,
+                format!(
+                    "正常帧率窗 {secs1:.0}s：{delta1} 步 = {rate1:.3} TPS（FPS 均值 {fps1:.1}）；节流窗 {secs2:.0}s：{delta2} 步 = {rate2:.3} TPS（FPS 均值 {fps2:.1}）；TPS 均 20±2% 且帧率分离（≥1.15×）={} ",
+                    fps_sep
+                ),
+            )
+        }
+        _ => (false, "采样缺失".into()),
+    };
+    checks.push(Check {
+        id: "A10",
+        name: "20 TPS 固定步与渲染分离（双帧率阶段）",
+        pass: a10,
+        detail: a10_detail,
+        evidence: "metrics.csv fixed_ticks/fps 列".into(),
+    });
 
     // ---- A11 稳定性 ----
     let panic_happened = acc.panic_flag_path.exists();
@@ -1684,6 +2172,12 @@ fn finalize(
     });
 
     // ---- A12 资源稳定 ----
+    // 判定语义：RSS 稳定（末段峰值 / 首稳定循环均值 ≤1.25）+
+    // 资源生命周期守恒（Chunk Mesh 实体：创建-删除 = 在册数；Mesh 资产：
+    // 创建-删除 = 资产总数；材质：创建 = 资产总数）+
+    // Chunk 实体数全程稳定。创建/删除计数与三类资产数以 1Hz 采样进
+    // metrics.csv（mesh_assets/materials/chunk_entities/mesh_created/
+    // mesh_removed 列），构成时间序列。
     let win_mean = |lo: f64, hi: f64| -> Option<f64> {
         let s: Vec<f64> = acc
             .rss_samples
@@ -1710,20 +2204,40 @@ fn finalize(
         .find(|(ts, _)| *ts >= 200.0)
         .map(|(_, e)| *e);
     let ent_last = acc.entity_samples.last().map(|(_, e)| *e);
+    let live_entities = (stats.entity_spawned.saturating_sub(stats.entity_despawned)) as usize;
+    let live_meshes = stats.mesh_created.saturating_sub(stats.mesh_removed) as usize;
     let (a12, a12_detail) = match (first, ent_first, ent_last) {
         (Some(first), Some(ef), Some(el)) => {
             let ratio = last_max / first.max(1.0);
             let stable_entities = ef == el;
-            (ratio <= 1.25 && stable_entities, format!("首稳定循环均值 RSS {first:.0}MB，末段峰值 {last_max:.0}MB（×{ratio:.3}，阈值 1.25）；Chunk 实体 {ef}→{el}"))
+            let spawned = stats.entity_spawned;
+            let despawned = stats.entity_despawned;
+            let created = stats.mesh_created;
+            let removed = stats.mesh_removed;
+            let mat_created = stats.material_created;
+            let cons_entities = live_entities == registry.meshed_count();
+            let cons_meshes = live_meshes == mesh_assets;
+            let cons_materials = mat_created as usize == material_assets;
+            let ok =
+                ratio <= 1.25 && stable_entities && cons_entities && cons_meshes && cons_materials;
+            (
+                ok,
+                format!(
+                    "首稳定循环均值 RSS {first:.0}MB，末段峰值 {last_max:.0}MB（×{ratio:.3}，阈值 1.25）；Chunk 实体 {ef}→{el}；守恒：实体 {spawned}-{despawned}={live_entities}（在册 {}） Mesh {created}-{removed}={live_meshes}（资产 {mesh_assets}） 材质 {mat_created}（资产 {material_assets}）",
+                    registry.meshed_count(),
+                ),
+            )
         }
         _ => (false, "RSS/实体采样缺失".into()),
     };
     checks.push(Check {
         id: "A12",
-        name: "资源稳定",
+        name: "资源稳定（RSS + 资源生命周期守恒）",
         pass: a12,
         detail: a12_detail,
-        evidence: "metrics.csv rss_mb 列".into(),
+        evidence:
+            "metrics.csv rss_mb/mesh_assets/materials/chunk_entities/mesh_created/mesh_removed 列"
+                .into(),
     });
 
     // ---- A13 性能基线 ----
@@ -1780,7 +2294,8 @@ fn finalize(
 
     // 报告输出。
     let meta = format!(
-        "{{\n  \"seed\": {},\n  \"size\": [{}, {}, {}],\n  \"world_hash\": \"{:#x}\",\n  \"window\": [{}, {}],\n  \"profile\": \"release\",\n  \"duration_s\": {:.1},\n  \"gif_frames\": {},\n  \"timestamp\": \"{}\"\n}}",
+        "{{\n  \"run_id\": \"{}\",\n  \"seed\": {},\n  \"size\": [{}, {}, {}],\n  \"world_hash\": \"{:#x}\",\n  \"window\": [{}, {}],\n  \"profile\": \"release\",\n  \"duration_s\": {:.1},\n  \"gif_frames\": {},\n  \"git_head\": \"{}\",\n  \"timestamp\": \"{}\"\n}}",
+        acc.run_id,
         acc.cfg.seed,
         acc.cfg.size.x,
         acc.cfg.size.y,
@@ -1790,6 +2305,7 @@ fn finalize(
         acc.cfg.window[1],
         t,
         acc.gif_frame_count,
+        json_escape(&git_head_sha()),
         chrono_like_now(),
     );
     let checks_json: Vec<String> = checks
@@ -1812,6 +2328,15 @@ fn finalize(
         overall
     );
     let _ = std::fs::write(acc.dir.join("report.json"), &json);
+    // 资源时间序列独立落盘（与 metrics.csv 等价，便于消费方直接读取）。
+    {
+        let mut rl =
+            String::from("t_s,mesh_assets,materials,chunk_entities,mesh_created,mesh_removed\n");
+        for (ts, ma, mt, ce, cr, rm) in &acc.resource_samples {
+            rl.push_str(&format!("{ts:.2},{ma},{mt},{ce},{cr},{rm}\n"));
+        }
+        let _ = std::fs::write(acc.dir.join("resource_timeline.csv"), rl);
+    }
 
     let mut md = String::new();
     md.push_str("# 初版验收报告（自动判定）\n\n");
@@ -1819,7 +2344,8 @@ fn finalize(
         "- **总体结论：{overall}**（A01-A13 运行时判定；A14 由独立 Reviewer 复核出具）\n"
     ));
     md.push_str(&format!(
-        "- Seed：{}，世界 {}×{}×{}，窗口 {}×{}，运行 {:.0}s\n",
+        "- run_id：`{}`，Seed：{}，世界 {}×{}×{}，窗口 {}×{}，运行 {:.0}s\n",
+        acc.run_id,
         acc.cfg.seed,
         acc.cfg.size.x,
         acc.cfg.size.y,
@@ -1865,6 +2391,39 @@ fn chrono_like_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "unknown".into())
+}
+
+/// 基本图像有效性（A04）：可解码、尺寸匹配窗口、像素统计排除
+/// 全黑 / 全白 / 纯色图（渲染全黑事故曾以"文件存在且 >10KB"漏检）。
+fn validate_image(path: &Path, expect_size: Option<(u32, u32)>) -> Result<String, String> {
+    let img = image::open(path).map_err(|e| format!("解码失败: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if let Some((ew, eh)) = expect_size {
+        if (w, h) != (ew, eh) {
+            return Err(format!("尺寸 {w}x{h} 与窗口 {ew}x{eh} 不符"));
+        }
+    }
+    let rgba = img.to_rgba8();
+    let n = (rgba.len() / 4) as f64;
+    let mut sum = 0f64;
+    let mut sum2 = 0f64;
+    for px in rgba.pixels() {
+        let l = 0.2126 * px[0] as f64 + 0.7152 * px[1] as f64 + 0.0722 * px[2] as f64;
+        sum += l;
+        sum2 += l * l;
+    }
+    let mean = sum / n;
+    let stddev = ((sum2 / n).max(0.0) - mean * mean).sqrt();
+    if mean < 1.0 {
+        return Err(format!("图像接近全黑（平均亮度 {mean:.2}）"));
+    }
+    if mean > 254.0 {
+        return Err(format!("图像接近全白（平均亮度 {mean:.2}）"));
+    }
+    if stddev < 1.0 {
+        return Err(format!("图像接近纯色（亮度标准差 {stddev:.2}）"));
+    }
+    Ok(format!("{w}x{h} 亮度均值 {mean:.1} 标准差 {stddev:.1}"))
 }
 
 /// 把 gif_frames/*.png 组装为巡航 GIF（"录像"证据；无 ffmpeg 环境的替代方案）。

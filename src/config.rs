@@ -1,4 +1,4 @@
-//! 启动配置（任务书 4.1：Seed、世界尺寸、必要调试开关）。
+//! 启动配置（Seed、世界尺寸、必要调试开关）。
 //!
 //! 参数形式（决策记录 D-06）：`--key value` 形式的手写解析，不引入 clap。
 //! 交互运行：`craftsman-fortress [--seed N] [--size X Y Z] [--window W H] [--tint]`
@@ -10,7 +10,7 @@ use crate::coords::WorldSize;
 /// 2026-09-13 参数修订（山体掩码/洞口探测）后经 feature_scan 全量扫描选定：
 /// 该 seed 八类特征齐备且余量最大（峰 115m、高差 112m、洞口贯穿 -7m）。
 pub const DEFAULT_SEED: u64 = 12345;
-/// 默认世界尺寸（体素）：256 × 128 × 256（任务书下限）。
+/// 默认世界尺寸（体素）：256 × 128 × 256（验证规模下限）。
 pub const DEFAULT_SIZE: WorldSize = WorldSize::new(256, 128, 256);
 /// 验收窗口分辨率（固定，性能门槛 A13 的声明条件）。
 pub const ACCEPTANCE_WINDOW: [f32; 2] = [1280.0, 720.0];
@@ -113,9 +113,9 @@ fn validate_size(x: u32, y: u32, z: u32) -> Result<(), String> {
     if !x.is_multiple_of(CHUNK) || !y.is_multiple_of(CHUNK) || !z.is_multiple_of(CHUNK) {
         return Err("尺寸必须是 16 的整数倍（Chunk 尺寸）".into());
     }
-    // 验收规模下限在任务书约束内（256×128×256）；更大尺寸允许但给出提示。
+    // 验收规模下限（256×128×256）；更大尺寸允许但给出提示。
     if x < 256 || z < 256 || y < 128 {
-        return Err("尺寸低于任务书下限 256×128×256".into());
+        return Err("尺寸低于验证下限 256×128×256".into());
     }
     if x > 512 || y > 256 || z > 512 {
         return Err("尺寸超出初版验证上限 512×256×512".into());
@@ -125,7 +125,7 @@ fn validate_size(x: u32, y: u32, z: u32) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "工匠要塞：机械纪元（初版验证构建）\n\
+        "工匠要塞（初版验证构建）\n\
          用法: craftsman-fortress [选项]\n\
          \x20 --seed N          世界种子（默认 {DEFAULT_SEED}）\n\
          \x20 --size X Y Z      世界尺寸（体素，默认 256 128 256）\n\

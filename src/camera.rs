@@ -1,8 +1,10 @@
-//! 自由透视相机：焦点 + 轨道模型（任务书 4.5）。
+//! 自由透视相机：焦点 + 轨道模型。
 //!
 //! - Perspective 投影，围绕可移动"焦点"旋转 / 俯仰 / 缩放；
 //! - 俯仰、距离、焦点范围全部受限且稳定；
-//! - 相机不得停留于实体体素内：从焦点向相机方向做 DDA，命中则压缩轨道距离
+//! - 焦点不得停留于实体体素内：普通键鼠控制横穿山体时，求解层把焦点
+//!   沿所在列抬升到最近空气（贴地滑行，`resolve_focus_out_of_solid`）；
+//! - 眼位不得进入实体体素：从焦点向相机方向做 DDA，命中则压缩轨道距离
 //!   （可收缩至 0，眼位退到焦点）；一阶指数平滑收敛，无振荡（A08）；
 //! - 验收模式由脚本注入位姿（`control_locked` 锁定用户输入）。
 
@@ -26,6 +28,8 @@ pub const DIST_MIN: f32 = 6.0;
 pub const DIST_MAX: f32 = 150.0;
 /// 相机与实体表面的最小留白（米）。
 pub const COLLISION_MARGIN: f32 = 0.5;
+/// 焦点被抬出实体后与实体顶面的间隙（米）。
+pub const FOCUS_SURFACE_MARGIN: f32 = 0.3;
 /// 平滑系数（1/s）：越大收敛越快。一阶滤波不会振荡。
 const DIST_SMOOTHING: f32 = 14.0;
 
@@ -106,6 +110,28 @@ impl CameraRig {
         let mut rig = self.clone();
         rig.dist = self.dist;
         rig.desired_eye()
+    }
+
+    /// 焦点入实体纠正（普通交互的贴地滑行）：
+    /// 焦点体素为实体时，沿所在列向上找最近空气格，把焦点抬到实体顶面 +
+    /// `FOCUS_SURFACE_MARGIN`。WASD/平移横穿山体、悬崖时焦点保持 在空气中，
+    /// 眼位碰撞钳制（`collision_clamped_dist`）以空气中的焦点为 DDA 起点。
+    /// 洞穴机位（焦点在山体内部的空气格）不触发——只有焦点本身落在实体内才抬升。
+    pub fn resolve_focus_out_of_solid(&mut self, world: &World) {
+        let mut v = IVec3::new(
+            self.focus.x.floor() as i32,
+            self.focus.y.floor() as i32,
+            self.focus.z.floor() as i32,
+        );
+        if !world.size.contains(v) || !world.voxel(v).is_solid() {
+            return;
+        }
+        while v.y < world.size.y as i32 && world.voxel(v).is_solid() {
+            v.y += 1;
+        }
+        // v.y 现在是实体柱上方的第一个空气格（整列实体时等于 size.y，
+        // 由 clamp_all 钳回 max_focus_y 兜底）。
+        self.focus.y = (v.y as f32 + FOCUS_SURFACE_MARGIN).min(self.max_focus_y);
     }
 
     /// 碰撞钳制：从焦点向理想相机方向步进，命中实体则收缩距离。
@@ -220,6 +246,9 @@ pub fn camera_solve_system(
     };
     let rig = &mut rig.0;
     let dt = time.delta_secs().min(0.1);
+    // 焦点入实体纠正必须先于碰撞钳制：DDA 起点（焦点）必须已在空气中，
+    // 普通键鼠控制横穿山体时焦点贴地滑行而非钻入地形。
+    rig.resolve_focus_out_of_solid(world);
     let clamped = rig.collision_clamped_dist(world);
     // 平滑只作用于"放宽"方向：先向用户目标距离收敛，再被碰撞上限硬性钳住。
     // 收缩即时（防穿模优先，消除平滑超前导致的瞬态入模）；clamped 由几何决定、
@@ -384,5 +413,122 @@ mod tests {
             60.0,
         );
         assert_eq!(rig.collision_clamped_dist(&world), 60.0);
+    }
+
+    /// 焦点位于山体内部：沿所在列抬升到实体顶面 + 间隙（普通交互横穿山体）。
+    #[test]
+    fn focus_inside_mountain_lifted_to_surface() {
+        let mut solid = Vec::new();
+        // x=8..14、z=8..14、y=0..30 的实体山体。
+        for y in 0..30 {
+            for z in 8..14 {
+                for x in 8..14 {
+                    solid.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(10.5, 15.0, 10.5), // 山体内部
+            0.8,
+            0.9,
+            30.0,
+        );
+        rig.resolve_focus_out_of_solid(&world);
+        assert!(
+            (rig.focus.y - 30.3).abs() < 1e-4,
+            "焦点应抬升到顶面 30 + 间隙 0.3，实际 {}",
+            rig.focus.y
+        );
+        let v = IVec3::new(
+            rig.focus.x.floor() as i32,
+            rig.focus.y.floor() as i32,
+            rig.focus.z.floor() as i32,
+        );
+        assert!(!world.voxel(v).is_solid(), "纠正后焦点 {v:?} 不得在实体内");
+    }
+
+    /// 洞穴机位：焦点在山体内部的空气格（四周皆实体）不得被抬升。
+    #[test]
+    fn focus_in_cave_air_untouched() {
+        let mut solid = Vec::new();
+        // 外壳 8..16³ 实体，中心 (11,11,11) 挖空为洞穴。
+        for y in 8..16 {
+            for z in 8..16 {
+                for x in 8..16 {
+                    if x == 11 && y == 11 && z == 11 {
+                        continue;
+                    }
+                    solid.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(11.5, 11.5, 11.5),
+            0.0,
+            PITCH_MIN,
+            1.5,
+        );
+        rig.resolve_focus_out_of_solid(&world);
+        assert!(
+            (rig.focus.y - 11.5).abs() < 1e-6,
+            "洞穴空气格中的焦点不得被移动，实际 {}",
+            rig.focus.y
+        );
+    }
+
+    /// 焦点已在空气：纠正必须为无操作（含贴地空气格）。
+    #[test]
+    fn focus_in_air_untouched() {
+        let world = world_with(&[IVec3::new(10, 5, 10)]);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(10.5, 6.3, 10.5), // 实体正上方空气
+            0.8,
+            0.9,
+            20.0,
+        );
+        rig.resolve_focus_out_of_solid(&world);
+        assert!((rig.focus.y - 6.3).abs() < 1e-6);
+    }
+
+    /// 低空横穿实体墙：路径逐帧采样，纠正后每个焦点都必须在空气中
+    ///（普通键鼠控制横穿地形的等价模拟，不依赖任何验收脚本保护）。
+    #[test]
+    fn focus_crossing_wall_stays_in_air_every_frame() {
+        let mut solid = Vec::new();
+        // x=8..14、z=8..14、y=0..20 的墙，路径 x 从 4 走到 24 直线穿过。
+        for y in 0..20 {
+            for z in 8..14 {
+                for x in 8..14 {
+                    solid.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let world = world_with(&solid);
+        let mut rig = CameraRig::new(
+            (64.0, 64.0, 64.0),
+            Vec3::new(4.0, 6.0, 10.5),
+            0.8,
+            0.9,
+            20.0,
+        );
+        for i in 0..=40 {
+            rig.focus.x = 4.0 + i as f32 * 0.5;
+            rig.focus.y = 6.0;
+            rig.resolve_focus_out_of_solid(&world);
+            let v = IVec3::new(
+                rig.focus.x.floor() as i32,
+                rig.focus.y.floor() as i32,
+                rig.focus.z.floor() as i32,
+            );
+            assert!(
+                !world.voxel(v).is_solid(),
+                "步 {i}：纠正后焦点 {v:?} 仍在实体内"
+            );
+        }
     }
 }

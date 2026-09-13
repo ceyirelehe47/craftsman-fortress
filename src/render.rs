@@ -57,6 +57,20 @@ impl Default for DebugTintRes {
 #[derive(Resource, Default)]
 pub struct StandardMaterialHandle(pub Option<Handle<StandardMaterial>>);
 
+/// Mesh/实体资源生命周期计数（A12 资源时间序列的数据源）。
+/// 只增不减；"在册实体 = spawned - despawned" 与 "Mesh 资产 = created - removed"
+/// 是泄漏检测的守恒断言。
+#[derive(Resource, Default, Clone, Copy)]
+pub struct MeshResourceStats {
+    pub mesh_created: u64,
+    pub mesh_removed: u64,
+    /// 句柄复用的原地内容替换（不创建新资产）。
+    pub mesh_replaced: u64,
+    pub entity_spawned: u64,
+    pub entity_despawned: u64,
+    pub material_created: u64,
+}
+
 /// 加载进度游标。
 #[derive(Resource, Default)]
 pub struct LoadingCursor {
@@ -73,6 +87,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<DebugTintRes>();
     app.init_resource::<LoadingCursor>();
     app.init_resource::<StandardMaterialHandle>();
+    app.init_resource::<MeshResourceStats>();
     app.add_systems(
         OnEnter(GameState::Loading),
         (setup_scene, create_material).chain(),
@@ -139,16 +154,18 @@ pub fn fog_color() -> Color {
 fn create_material(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut handle: ResMut<StandardMaterialHandle>,
+    mut stats: ResMut<MeshResourceStats>,
 ) {
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         // unlit + 烘焙顶点色（meshing 按 FaceDir 乘 0.55..1.0 明暗）是本版的光照模型：
         // 方向光无阴影贴图会把背光面压成死黑、并把阳光"泄漏"进洞穴；
-        // 烘焙面着色让任意朝向的面都保持调色板可读性（任务书 4.4）。
+        // 烘焙面着色让任意朝向的面都保持调色板可读性。
         unlit: true,
         ..Default::default()
     });
     handle.0 = Some(mat);
+    stats.material_created += 1;
 }
 
 /// 从纯数据装配 Bevy Mesh。
@@ -165,11 +182,13 @@ pub fn mesh_from_data(data: &ChunkMeshData) -> Mesh {
 }
 
 /// （重新）为一个 Chunk 构建/替换 Mesh 实体。空数据 => 移除实体。
+#[allow(clippy::too_many_arguments)]
 pub fn apply_chunk_mesh(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: &Handle<StandardMaterial>,
     registry: &mut ChunkMeshes,
+    stats: &mut MeshResourceStats,
     cc: IVec3,
     data: &ChunkMeshData,
 ) {
@@ -177,6 +196,8 @@ pub fn apply_chunk_mesh(
         if let Some((entity, handle)) = registry.entries.remove(&cc) {
             commands.entity(entity).despawn();
             meshes.remove(&handle);
+            stats.mesh_removed += 1;
+            stats.entity_despawned += 1;
         }
         // 记录"已网格化但结果为空"：0 面 chunk 无需实体，但准备状态算完成。
         registry.meshed_empty.insert(cc);
@@ -189,6 +210,7 @@ pub fn apply_chunk_mesh(
             // 句柄复用：原地替换资源内容，实体与句柄保持稳定。
             // 0.19 起 Assets::insert 返回 Result（句柄已存在时必然成功）。
             let _ = meshes.insert(handle.id(), mesh);
+            stats.mesh_replaced += 1;
         }
         None => {
             let handle = meshes.add(mesh);
@@ -200,6 +222,8 @@ pub fn apply_chunk_mesh(
                 ))
                 .id();
             registry.entries.insert(cc, (entity, handle));
+            stats.mesh_created += 1;
+            stats.entity_spawned += 1;
         }
     }
 }
@@ -221,6 +245,7 @@ fn loading_progress_system(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Res<StandardMaterialHandle>,
     mut registry: ResMut<ChunkMeshes>,
+    mut stats: ResMut<MeshResourceStats>,
     mut cursor: ResMut<LoadingCursor>,
     tint: Res<DebugTintRes>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -261,6 +286,7 @@ fn loading_progress_system(
                     &mut meshes,
                     material,
                     &mut registry,
+                    &mut stats,
                     cc,
                     &data,
                 );
@@ -298,6 +324,7 @@ fn rebuild_dirty_system(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Res<StandardMaterialHandle>,
     mut registry: ResMut<ChunkMeshes>,
+    mut stats: ResMut<MeshResourceStats>,
     tint: Res<DebugTintRes>,
 ) {
     let Some(world) = world_res.0.as_mut() else {
@@ -314,6 +341,7 @@ fn rebuild_dirty_system(
             &mut meshes,
             material,
             &mut registry,
+            &mut stats,
             cc,
             &data,
         );
