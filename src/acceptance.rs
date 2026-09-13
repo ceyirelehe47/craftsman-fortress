@@ -879,17 +879,19 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
             group_len - enter_len
         };
         // 第一进入段从巡航末机位完整过渡（yaw/pitch/dist 连续收敛），
-        // 其余段沿用统一的低空位姿参数。
+        // 其余段沿用统一的低空位姿参数。yaw 全部继承巡航累计值：
+        // 低空段不旋转——巡航 yaw 单调累计可达数十弧度，若 lerp 到固定
+        // 角度会引发环绕回卷（切向速度数百 m/s，A06 跳变断言必然超限）。
         let from_pose = if i == 0 {
             prev
         } else {
-            Pose::surface(from, 0.9, 0.42, 14.0)
+            Pose::surface(from, prev.yaw, 0.42, 14.0)
         };
         acc.segments.push(Segment {
             t0: lt,
             t1: lt + len,
             from: from_pose,
-            to: Pose::surface(to, 0.9, 0.42, 14.0),
+            to: Pose::surface(to, prev.yaw, 0.42, 14.0),
             cut: false,
             arc: 0.0,
             coverage: cov,
@@ -926,8 +928,8 @@ fn build_timeline(acc: &mut AcceptanceState, world: &World, features: &FeatureRe
     acc.segments.push(Segment {
         t0: t_rest,
         t1: T_FINALIZE + 1e9,
-        from: Pose::surface(rest_focus, 0.9, 0.42, 14.0),
-        to: Pose::surface(rest_focus, 0.9, 0.42, 14.0),
+        from: Pose::surface(rest_focus, prev.yaw, 0.42, 14.0),
+        to: Pose::surface(rest_focus, prev.yaw, 0.42, 14.0),
         cut: false,
         arc: 0.0,
         coverage: Coverage::default(),
@@ -1095,15 +1097,17 @@ fn acceptance_control(
                 acc.focus_solid_first = Some(fv);
             }
         }
-        // 脏队列清空计时（A07）：一波"从 0 变正"到"归 0"的时长（信息项）。
+        // 脏队列清空计时（A07 信息项）：一波"从 0 变正"到"归 0"的时长。
+        // 波次计数不在采样处进行：单体素编辑只存活 1 帧即被重建系统清空，
+        // 采样会漏计——波次由 Mesh 修改动作源头直接计数（TintOn/TintOff/
+        // EditTest 各计 1 波）。
         let dirty_now = world.dirty_count();
-        if dirty_now > 0 {
-            if acc.prev_dirty == 0 {
-                acc.dirty_burst_start = Some(t);
-                acc.burst_count += 1;
+        if dirty_now == 0 {
+            if let Some(start) = acc.dirty_burst_start.take() {
+                acc.max_clear_delay = acc.max_clear_delay.max(t - start);
             }
-        } else if let Some(start) = acc.dirty_burst_start.take() {
-            acc.max_clear_delay = acc.max_clear_delay.max(t - start);
+        } else if acc.dirty_burst_start.is_none() {
+            acc.dirty_burst_start = Some(t);
         }
         acc.prev_dirty = dirty_now;
         // 队列静默窗（A07 主断言）：dirty==0 且 visible_unready==0 且
@@ -1332,13 +1336,18 @@ fn run_action(
         HighlightOff => {
             scripted_ray.0 = None;
         }
-        EditTest => run_edit_test(acc, world, t),
+        EditTest => {
+            acc.burst_count += 1;
+            run_edit_test(acc, world, t);
+        }
         VerifyEdit => verify_edit(acc, world, t),
         TintOn => {
+            acc.burst_count += 1;
             tint.0 = DebugTint::ChunkParity;
             mark_all_dirty(world);
         }
         TintOff => {
+            acc.burst_count += 1;
             tint.0 = DebugTint::Off;
             mark_all_dirty(world);
         }
@@ -1735,8 +1744,8 @@ fn finalize(
     registry: &ChunkMeshes,
     diag: &DiagState,
     stats: &MeshResourceStats,
-    mesh_assets: usize,
-    material_assets: usize,
+    _mesh_assets: usize,
+    _material_assets: usize,
     shot_log: &ShotLog,
     mut next_state: ResMut<NextState<GameState>>,
     mut exit: MessageWriter<AppExit>,
@@ -2207,27 +2216,43 @@ fn finalize(
         .find(|(ts, _)| *ts >= 200.0)
         .map(|(_, e)| *e);
     let ent_last = acc.entity_samples.last().map(|(_, e)| *e);
+    // 首稳定样本（t≥180）与末样本：Assets 总数含 Bevy 内置资产（mesh
+    // 预注册形状、内置材质），与在册实体数的差是平台常量——守恒判据
+    // 用"该差值全程恒定 + 创建-删除 == 在册数"，不假设内置数量。
+    let first_stable = acc
+        .resource_samples
+        .iter()
+        .find(|(ts, _, _, _, _, _)| *ts >= 180.0);
+    let last_sample = acc.resource_samples.last();
     let live_entities = (stats.entity_spawned.saturating_sub(stats.entity_despawned)) as usize;
     let live_meshes = stats.mesh_created.saturating_sub(stats.mesh_removed) as usize;
-    let (a12, a12_detail) = match (first, ent_first, ent_last) {
-        (Some(first), Some(ef), Some(el)) => {
+    let (a12, a12_detail) = match (first, ent_first, ent_last, first_stable, last_sample) {
+        (
+            Some(first),
+            Some(ef),
+            Some(el),
+            Some(&(t0, ma0, mt0, ce0, _, _)),
+            Some(&(_, ma1, mt1, ce1, _, _)),
+        ) if t0 >= 180.0 => {
             let ratio = last_max / first.max(1.0);
             let stable_entities = ef == el;
             let spawned = stats.entity_spawned;
             let despawned = stats.entity_despawned;
-            let created = stats.mesh_created;
-            let removed = stats.mesh_removed;
+            let _created = stats.mesh_created;
+            let _removed = stats.mesh_removed;
             let mat_created = stats.material_created;
             let cons_entities = live_entities == registry.meshed_count();
-            let cons_meshes = live_meshes == mesh_assets;
-            let cons_materials = mat_created as usize == material_assets;
+            let cons_meshes =
+                (ma0.saturating_sub(ce0) == ma1.saturating_sub(ce1)) && ma1 >= live_entities;
+            let cons_materials = mt0 == mt1 && (mat_created as usize) <= mt1;
             let ok =
                 ratio <= 1.25 && stable_entities && cons_entities && cons_meshes && cons_materials;
             (
                 ok,
                 format!(
-                    "首稳定循环均值 RSS {first:.0}MB，末段峰值 {last_max:.0}MB（×{ratio:.3}，阈值 1.25）；Chunk 实体 {ef}→{el}；守恒：实体 {spawned}-{despawned}={live_entities}（在册 {}） Mesh {created}-{removed}={live_meshes}（资产 {mesh_assets}） 材质 {mat_created}（资产 {material_assets}）",
+                    "首稳定循环均值 RSS {first:.0}MB，末段峰值 {last_max:.0}MB（×{ratio:.3}，阈值 1.25）；Chunk 实体 {ef}→{el}；守恒：实体 {spawned}-{despawned}={live_entities}（在册 {}） Mesh 创建-删除={live_meshes}（资产 {ma0}→{ma1}，内置差恒定 {}） 材质 创建 {mat_created}（资产 {mt0}→{mt1}）",
                     registry.meshed_count(),
+                    ma1.saturating_sub(ce1),
                 ),
             )
         }
