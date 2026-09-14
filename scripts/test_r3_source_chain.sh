@@ -152,4 +152,38 @@ if bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
   echo "失败：嵌套 ZIP 内的第三方 PNG 泄漏未被拦截。" >&2; exit 1
 fi
 
+# 合法的多层嵌套（三层 ZIP 且同层并列另一个 ZIP）必须通过；
+# 这是 scan_dir 递归深度计数被全局变量污染时的回归用例。
+mkdir -p "$TMP/legal_inner" "$TMP/legal_mid" "$TMP/legal_top"
+printf 'legal inner bytes\n' > "$TMP/legal_inner/inner_note.txt"
+printf 'legal sibling bytes\n' > "$TMP/legal_mid/sibling_note.txt"
+"$PY" - "$TMP/legal_mid/leaf.zip" "$TMP/legal_inner" <<'PY_LEAF'
+import pathlib, sys, zipfile
+root = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
+    for p in root.rglob('*'):
+        if p.is_file():
+            z.write(p, p.relative_to(root))
+PY_LEAF
+printf 'legal outer bytes\n' > "$TMP/legal_top/top_note.txt"
+"$PY" - "$TMP/legal_top/mid.zip" "$TMP/legal_mid" "$TMP/legal_top/sibling.zip" "$TMP/legal_mid" <<'PY_MID'
+import pathlib, sys, zipfile
+for zip_name, directory in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
+    root = pathlib.Path(directory)
+    with zipfile.ZipFile(zip_name, 'w') as z:
+        for p in root.rglob('*'):
+            if p.is_file():
+                z.write(p, p.relative_to(root))
+PY_MID
+"$PY" - "$TMP/legal_nested.zip" "$TMP/legal_top" <<'PY_TOPLEGAL'
+import pathlib, sys, zipfile
+root = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
+    for p in root.rglob('*'):
+        if p.is_file():
+            z.write(p, p.relative_to(root))
+PY_TOPLEGAL
+bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
+  --inventory "$LOCAL/inventory.tsv" "$TMP/legal_nested.zip"
+
 echo "R3.1 source-chain fixture PASS"

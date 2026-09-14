@@ -83,3 +83,7 @@ Windows 可能将 `python3` 解析到微软商店占位 stub（`WindowsApps/pyth
 ## R3.1-10 · unzip 容忍警告退出码（实现环境修正）
 
 本机 Git Bash 无 Info-ZIP `zip` CLI，`r2_acceptance.sh`/`r3_acceptance.sh` 的证据 ZIP 由 PowerShell `Compress-Archive` 生成：其本地文件头使用反斜杠，Info-ZIP `unzip -qq` 能完整解出全部条目但以退出码 1（警告）结束。`set -euo pipefail` 下这会误杀泄漏守卫的嵌套 ZIP 解包、发布脚本与下载复验脚本的证据解包。修正：`check_vendor_assets.sh`/`publish_r3_1_release.sh`/`verify_r3_1_release.sh` 的 unzip 调用仅在退出码 >1（真正的解包错误）时失败。已实测该类 ZIP 解包后条目数完整（108/108），守卫对嵌套内容的路径与内容哈希扫描不受影响。
+
+## R3.1-11 · scan_dir 递归深度计数修复与同轮无效发布清理（实现环境修正）
+
+`check_vendor_assets.sh` 的 `scan_dir` 原以全局变量保存 `root`/`depth`，递归调用返回后污染调用方循环的深度计数。当同一扫描层存在多个 ZIP（证据 ZIP 内同时含 `r2_1.zip` 与 `r2_1/r1.zip`）时，先处理的 ZIP 递归返回后，同层后续 ZIP 会被按被污染的深度误判为"嵌套超过 3 层"，产生假阳性。该 bug 在实现方验收的目录扫描中未触发（有效深度恰好少一层），但在发布脚本的下载复验（ZIP 目标扫描）中触发并使 verify 失败。修正为 `local root depth`，并在 `test_r3_source_chain.sh` 增加回归用例：合法三层嵌套且同层并列另一个 ZIP 必须通过。首次发布尝试创建的标签 `r3.1-baseline-562c2dfdc8b4` 与对应 Release 因其自带 verify 门禁失败而无效，属同一轮内的失败发布产物，已删除并在新代码验收提交上重新发布；历史标签（r3 及更早）未受影响。
