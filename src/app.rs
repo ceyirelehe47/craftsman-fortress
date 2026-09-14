@@ -8,7 +8,7 @@ use crate::coords::WorldSize;
 use crate::diagnostics::{self, DiagHudText};
 use crate::generation::TerrainParams;
 use crate::meshing::DebugTint;
-use crate::picking::{picking_highlight_system, CurrentPickRes, ScriptedRayRes};
+use crate::picking::{picking_highlight_system, CurrentPickRes, CurrentRayRes, ScriptedRayRes};
 use crate::render::{self, LoadingText};
 use crate::world::World;
 use bevy::prelude::*;
@@ -54,9 +54,44 @@ pub fn run() -> AppExit {
         )
     };
 
+    let object_save_path =
+        crate::object_persistence::object_logical_path(Path::new(&cfg.save_path));
+    let (object_store, loaded_object_generation) = if let Some(load_path) = cfg.load_path.as_ref() {
+        let object_load_path = crate::object_persistence::object_logical_path(Path::new(load_path));
+        match crate::object_persistence::load_latest(&object_load_path, &world) {
+            Ok(Some(loaded)) => {
+                info!(
+                    "加载对象存档：{} generation={} objects={} hash={:#x}",
+                    loaded.slot_path.display(),
+                    loaded.meta.generation,
+                    loaded.meta.object_count,
+                    loaded.meta.object_semantic_hash
+                );
+                (loaded.store, Some(loaded.meta.generation))
+            }
+            Ok(None) => (crate::objects::ObjectStore::new(), None),
+            Err(error) => {
+                eprintln!(
+                    "对象存档加载失败（{}）：{error}",
+                    object_load_path.display()
+                );
+                std::process::exit(4);
+            }
+        }
+    } else {
+        (crate::objects::ObjectStore::new(), None)
+    };
+
+    let asset_root = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("assets");
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                file_path: asset_root.to_string_lossy().to_string(),
+                ..Default::default()
+            })
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "工匠要塞 · 初版验证构建".into(),
@@ -81,6 +116,7 @@ pub fn run() -> AppExit {
 
     app.insert_resource(crate::camera::WorldRes(Some(world)));
     app.insert_resource(CurrentPickRes(None));
+    app.insert_resource(CurrentRayRes(None));
     app.insert_resource(ScriptedRayRes(None));
     if cfg.tint_debug {
         app.insert_resource(crate::render::DebugTintRes(DebugTint::ChunkParity));
@@ -100,15 +136,27 @@ pub fn run() -> AppExit {
     if acceptance {
         app.add_plugins(AcceptancePlugin::new(cfg.clone()));
     } else {
+        let manifest_path = std::env::var("R3_MANIFEST")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(crate::object_runtime::DEFAULT_OBJECT_MANIFEST)
+            });
+        crate::object_runtime::plugin(
+            &mut app,
+            object_store,
+            loaded_object_generation,
+            manifest_path,
+        );
         crate::editing::plugin(
             &mut app,
             std::path::PathBuf::from(&cfg.save_path),
+            object_save_path.clone(),
             loaded_generation,
         );
     }
 
     info!(
-        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={} 存档路径={} 加载={:?}",
+        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={} 存档路径={} 对象路径={} 加载={:?}",
         cfg.seed,
         cfg.size.x,
         cfg.size.y,
@@ -117,6 +165,7 @@ pub fn run() -> AppExit {
         cfg.window[1],
         acceptance,
         cfg.save_path,
+        object_save_path.display(),
         cfg.load_path
     );
     app.run()
@@ -155,7 +204,7 @@ fn spawn_ui_text(mut commands: Commands) {
     ));
     commands.spawn((
         Text::new(
-            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Shift fast · Delete remove · B place Stone · F5 save · F3 chunk tint · F12 screenshot",
+            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Delete/B terrain · 1/2/3 object · G rotate · P place · O select · M move · X delete · F5 save",
         ),
         TextFont {
             font_size: FontSize::Px(13.0),
