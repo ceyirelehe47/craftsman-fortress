@@ -1,0 +1,7 @@
+id	basename	category	target_height_m	yaw_deg
+axe_stone	axe_stone	tool	0.80	0
+bonefire	bonefire	prop	0.90	0
+grass_03	grass_03	environment	0.40	0
+stone_03	stone_03	environment	0.40	0
+tent	tent	building	2.40	0
+tree_11	tree_11	environment	4.50	0

@@ -44,3 +44,31 @@ examples/r3_asset_lab.rs                      可提交的视觉/资源验收程
 4. 比较清单哈希和 Transform 指纹；
 5. 检查固定截图、尺度、落地、加载错误和重复生成/销毁后的资源稳定性；
 6. 生成不含第三方模型文件的证据包。
+
+## R3.1 来源链与字节身份
+
+R3.1 将“清单路径存在”升级为完整来源链：
+
+```text
+受控私有缓存 / 受控下载 URL
+→ Free_Sample.rar 原包 SHA-256 + 字节数
+→ acquisition_receipt.txt（本次取得，user_interaction=none）
+→ source_receipt.txt（稳定授权快照，无运行时间戳）
+→ inventory.tsv（全部 GLB/PNG 的 SHA-256 与字节数）
+→ selection.tsv（稳定 ID 与尺度配置）
+→ selection.lock.tsv（选中 GLB 的实际字节身份）
+```
+
+`scripts/r3_acquire_sample.sh` 不提供人工下载回退；缺少私有缓存时明确失败。实现方与 Reviewer 必须分别在独立克隆中运行取得与准备流程。`scripts/r3_verify_local_assets.sh` 会重新计算原包、授权收据、inventory、selection 与所有本地 GLB/PNG 的哈希。
+
+`assets/r3/free_sample_selection_profile.tsv` 固定本轮已经人工确认过的六个代表模型、类别、目标高度和朝向。`r3_prepare_sample.sh` 会按规范化 basename 从 inventory 唯一解析路径、自动生成 selection 并立即锁定；实现方与 Reviewer 不再手工编辑清单。
+
+`manifest_hash` 继续描述运行配置；`asset_set_sha256` 描述具体素材字节集合。两者必须同时稳定。
+
+## R3.1 再分发守卫
+
+`check_vendor_assets.sh` 除路径与扩展名外，还使用 inventory/原包内容哈希扫描证据目录、发布 ZIP 与最多三层嵌套 ZIP，因此第三方 PNG 即使改名为普通截图也会被拒绝。
+
+## R3.1 生命周期
+
+所有承载 GLB 场景的父实体必须带 `Visibility`，避免 Bevy B0004。每轮临时对象销毁后至少等待命令应用和层级传播完成，再记录资源计数；五轮中的每一轮都必须回到基线，而不是只检查最终一轮。

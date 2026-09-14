@@ -119,6 +119,8 @@ struct LabState {
     temp_roots: Vec<Entity>,
     lifecycle_cycle: usize,
     lifecycle_spawned: bool,
+    lifecycle_waiting_for_settle: bool,
+    lifecycle_settle_frames: u16,
     finalized: bool,
 }
 
@@ -236,6 +238,8 @@ fn main() -> AppExit {
         temp_roots: Vec::new(),
         lifecycle_cycle: 0,
         lifecycle_spawned: false,
+        lifecycle_waiting_for_settle: false,
+        lifecycle_settle_frames: 0,
         finalized: false,
     });
     app.add_systems(Startup, setup);
@@ -373,6 +377,7 @@ fn prepare_loaded_assets(
                     rotation,
                     scale: Vec3::splat(plan.scale),
                 },
+                Visibility::Inherited,
                 LabModelRoot,
                 Name::new(format!("R3:{}", runtime.spec.id)),
             ))
@@ -544,7 +549,29 @@ fn drive_camera_and_lifecycle(
     }
 
     if elapsed >= 10.0 && state.lifecycle_cycle < 5 {
-        if !state.lifecycle_spawned {
+        let counts = ResourceCounts {
+            meshes: meshes.len(),
+            materials: materials.len(),
+            images: images.len(),
+            entities: entities.iter().count(),
+        };
+        if state.lifecycle_waiting_for_settle {
+            state.lifecycle_settle_frames = state.lifecycle_settle_frames.saturating_add(1);
+            let baseline = state.baseline_counts.unwrap_or_default();
+            let returned = counts.meshes == baseline.meshes
+                && counts.materials == baseline.materials
+                && counts.images == baseline.images
+                && counts.entities <= baseline.entities + 2;
+            if returned || state.lifecycle_settle_frames >= 120 {
+                let cycle = state.lifecycle_cycle + 1;
+                state
+                    .lifecycle_counts
+                    .push((format!("cycle_{cycle}"), counts));
+                state.lifecycle_cycle = cycle;
+                state.lifecycle_waiting_for_settle = false;
+                state.lifecycle_settle_frames = 0;
+            }
+        } else if !state.lifecycle_spawned {
             let scenes: Vec<_> = state
                 .assets
                 .iter()
@@ -559,6 +586,7 @@ fn drive_camera_and_lifecycle(
                                 0.0,
                                 repeat as f32 * 3.0,
                             ),
+                            Visibility::Hidden,
                             TempLifecycleRoot,
                         ))
                         .id();
@@ -567,22 +595,13 @@ fn drive_camera_and_lifecycle(
                 }
             }
             state.lifecycle_spawned = true;
-        } else if elapsed >= 10.5 + state.lifecycle_cycle as f32 * 1.0 {
+        } else if elapsed >= 10.75 + state.lifecycle_cycle as f32 * 1.5 {
             for root in state.temp_roots.drain(..) {
                 commands.entity(root).despawn();
             }
             state.lifecycle_spawned = false;
-            state.lifecycle_cycle += 1;
-            let counts = ResourceCounts {
-                meshes: meshes.len(),
-                materials: materials.len(),
-                images: images.len(),
-                entities: entities.iter().count(),
-            };
-            let cycle = state.lifecycle_cycle;
-            state
-                .lifecycle_counts
-                .push((format!("cycle_{cycle}"), counts));
+            state.lifecycle_waiting_for_settle = true;
+            state.lifecycle_settle_frames = 0;
         }
     }
 }
@@ -691,6 +710,28 @@ fn finalize_when_ready(
             "entity count did not return to baseline: baseline={}, final={}",
             baseline.entities, final_counts.entities
         ));
+    }
+    let cycle_rows: Vec<_> = state
+        .lifecycle_counts
+        .iter()
+        .filter(|(phase, _)| phase.starts_with("cycle_"))
+        .collect();
+    if cycle_rows.len() != 5 {
+        failures.push(format!(
+            "expected 5 settled lifecycle rows, got {}",
+            cycle_rows.len()
+        ));
+    }
+    for (phase, counts) in cycle_rows {
+        if counts.meshes != baseline.meshes
+            || counts.materials != baseline.materials
+            || counts.images != baseline.images
+            || counts.entities > baseline.entities + 2
+        {
+            failures.push(format!(
+                "{phase} did not settle to baseline: baseline={baseline:?}, actual={counts:?}"
+            ));
+        }
     }
 
     let pass = failures.is_empty();
