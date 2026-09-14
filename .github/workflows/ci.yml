@@ -47,6 +47,9 @@ jobs:
           bash scripts/check_vendor_assets.sh
           cargo run --release --example r3_manifest_check -- testdata/r3/fixture_manifest.tsv
 
+      - name: R3.1 来源链与贴图泄漏夹具
+        run: bash scripts/test_r3_source_chain.sh
+
       - name: R2.1 headless recovery and startup rejection
         env:
           R2_HEADLESS_WATCHDOG_SEC: "300"
