@@ -16,5 +16,11 @@
 
 ## 美术素材
 
-无任何外部美术资产。全部视觉为程序化生成：方块调色板（`voxel.rs`）、
-面朝向着色系数、天空/雾色、gizmos 高亮。
+R2.1 及之前的正式运行内容仍全部为程序化视觉。R3 开始验证 PalmStudio 的
+**Voxel Survival Pack v1.0** 免费样本，但模型原件、修改后模型、贴图和原始压缩包均为
+本地忽略内容，不进入 Git、任务包、CI Artifact、验收证据 ZIP 或 GitHub Release。
+
+来源：`https://palmstudio.itch.io/voxel-survival-pack`。来源页面允许个人与商业项目使用及修改，
+署名为可选；禁止在未获明确许可时重新分发、转售或重新打包原始/修改素材。
+仓库只提交导入代码、清单格式、测试夹具、来源/哈希元数据和不含模型文件的视觉证据。
+`scripts/check_vendor_assets.sh` 在 CI 与完整验收中强制执行该边界。

@@ -6,6 +6,7 @@
 pub mod acceptance;
 pub mod app;
 pub mod app_state;
+pub mod asset_manifest;
 pub mod camera;
 pub mod chunk;
 pub mod config;
