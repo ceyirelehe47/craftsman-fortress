@@ -204,6 +204,10 @@ fn dir_to_entry_face(d: Vec3) -> FaceDir {
 #[derive(Resource, Default)]
 pub struct CurrentPickRes(pub Option<PickHit>);
 
+/// 当前实际拾取射线，供独立对象层与体素层共享。
+#[derive(Resource, Default)]
+pub struct CurrentRayRes(pub Option<Ray>);
+
 /// 脚本射线注入（验收 A09）：设置后高亮与 CurrentPickRes 使用该射线。
 #[derive(Resource, Default)]
 pub struct ScriptedRayRes(pub Option<Ray>);
@@ -215,6 +219,7 @@ pub fn picking_highlight_system(
     window_q: Query<&Window, With<PrimaryWindow>>,
     mut gizmos: Gizmos,
     mut current: ResMut<CurrentPickRes>,
+    mut current_ray: ResMut<CurrentRayRes>,
     scripted: Res<ScriptedRayRes>,
 ) {
     let Some(world) = world_res.0.as_ref() else {
@@ -238,8 +243,10 @@ pub fn picking_highlight_system(
     };
     let Some(ray) = ray else {
         current.0 = None;
+        current_ray.0 = None;
         return;
     };
+    current_ray.0 = Some(ray);
     let hit = pick_voxel(world, &ray, 400.0);
     current.0 = hit;
 

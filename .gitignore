@@ -15,3 +15,10 @@ third_party_raw/
 assets/vendor_local/
 evidence_r3_*/
 evidence_r3_*.zip
+
+# R4 object companion slots.
+*.objects.slot0
+*.objects.slot1
+*.objects.slot?.tmp-*
+evidence_r4_*/
+evidence_r4_*.zip
