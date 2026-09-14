@@ -186,4 +186,48 @@ PY_TOPLEGAL
 bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
   --inventory "$LOCAL/inventory.tsv" "$TMP/legal_nested.zip"
 
+# 目录入口不得贡献 ZIP 嵌套层（R4 发布下载复验回归）：
+# 证据链 evidence.zip ⊃ level3 ⊃ level2 ⊃ level1 共四层 zip 包裹，
+# zip 直扫合法；把它作为文件放进目录再扫，结论必须一致（通过）。
+build_zip() { "$PY" - "$1" "$2" <<'PY_ZIPDIR'
+import pathlib, sys, zipfile
+root = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
+    for p in root.rglob('*'):
+        if p.is_file():
+            z.write(p, p.relative_to(root))
+PY_ZIPDIR
+}
+build_chain() { # build_chain <层数> <evidence.zip 路径>：evidence ⊃ levelN ⊃ … ⊃ level1 ⊃ note
+  levels="$1"; out="$2"; work="$TMP/chain_${levels}"
+  mkdir -p "$work/d0" "$(dirname "$out")"
+  printf 'innermost note\n' > "$work/d0/note.txt"
+  prev="$work/d0"
+  i=1
+  while [ "$i" -le "$levels" ]; do
+    mkdir -p "$work/d$i"
+    build_zip "$work/d$i/level$i.zip" "$prev"
+    prev="$work/d$i"
+    i=$((i + 1))
+  done
+  build_zip "$out" "$prev"
+}
+build_chain 3 "$TMP/dir_release/evidence_impl_fixture.zip"
+bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
+  --inventory "$LOCAL/inventory.tsv" "$TMP/dir_release/evidence_impl_fixture.zip"
+bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
+  --inventory "$LOCAL/inventory.tsv" "$TMP/dir_release"
+
+# 五层包裹（evidence ⊃ level4 ⊃ level3 ⊃ level2 ⊃ level1）在两种入口下都必须失败：
+# 证明目录入口修正没有放宽拒绝边界。
+build_chain 4 "$TMP/dir_release5/evidence_impl_fixture.zip"
+if bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
+  --inventory "$LOCAL/inventory.tsv" "$TMP/dir_release5" >/dev/null 2>&1; then
+  echo "失败：五层包裹 zip 在目录入口未被拒绝。" >&2; exit 1
+fi
+if bash scripts/check_vendor_assets.sh --manifest "$LOCAL/selection.tsv" \
+  --inventory "$LOCAL/inventory.tsv" "$TMP/dir_release5/evidence_impl_fixture.zip" >/dev/null 2>&1; then
+  echo "失败：五层包裹 zip 在 zip 直扫入口未被拒绝。" >&2; exit 1
+fi
+
 echo "R3.1 source-chain fixture PASS"

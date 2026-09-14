@@ -139,7 +139,13 @@ fi
 for target in "${TARGETS[@]}"; do
   [ -e "$target" ] || continue
   if [ -d "$target" ]; then
-    scan_dir "$target" 0
+    # 目录目标本身不贡献 ZIP 嵌套层：在 depth 语义中，一个 zip 的包裹层数
+    # = 发现深度 + 1（zip 文件目标的内容从 0 开始扫描，同理目录里的 zip）。
+    # 若目录入口也从 0 开始，同一字节会出现两种判定：R4 发布下载复验
+    # （r4.zip ⊃ r3_1.zip ⊃ r2_1.zip ⊃ r1.zip 的四层包裹链在 zip 直扫合法）
+    # 会被多记一层幻影深度而误拒。拒绝边界不变：任何含四层 zip-in-zip
+    # 包裹（发现深度 3）的结构在两种入口下同样失败。
+    scan_dir "$target" -1
   else
     if path_forbidden "$(basename "$target")"; then
       echo "失败：禁止把素材文件作为证据/发布资产：$target" >&2
