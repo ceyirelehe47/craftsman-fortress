@@ -42,6 +42,11 @@ jobs:
       - name: Shell 脚本语法
         run: bash -n scripts/*.sh
 
+      - name: R3 第三方素材边界与清单夹具
+        run: |
+          bash scripts/check_vendor_assets.sh
+          cargo run --release --example r3_manifest_check -- testdata/r3/fixture_manifest.tsv
+
       - name: R2.1 headless recovery and startup rejection
         env:
           R2_HEADLESS_WATCHDOG_SEC: "300"

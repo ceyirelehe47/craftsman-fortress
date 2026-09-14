@@ -1,0 +1,10 @@
+# source_url=https://palmstudio.itch.io/voxel-survival-pack
+# pack_version=v1.0
+# sample_file=Free_Sample.rar
+# archive_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# license_receipt_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# acquired_at=2026-09-14T00:00:00Z
+id	path	category	target_height_m	yaw_deg
+fixture_character	vendor_local/voxel_survival_pack/v1.0/free_sample/fixture_character.glb	character	1.80	180
+fixture_prop	vendor_local/voxel_survival_pack/v1.0/free_sample/fixture_prop.glb	prop	1.00	0
+fixture_tree	vendor_local/voxel_survival_pack/v1.0/free_sample/fixture_tree.glb	environment	4.00	0

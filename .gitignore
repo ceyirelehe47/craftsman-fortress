@@ -9,3 +9,9 @@ saves/
 *.cfsv.slot0
 *.cfsv.slot1
 *.cfsv.slot?.tmp-*
+
+# R3 third-party asset packs are local-only; never commit or release them.
+third_party_raw/
+assets/vendor_local/
+evidence_r3_*/
+evidence_r3_*.zip
