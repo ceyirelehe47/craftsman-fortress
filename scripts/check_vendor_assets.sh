@@ -100,7 +100,10 @@ extract_zip() {
 }
 
 scan_dir() {
-  root="$1"; depth="$2"
+  # root/depth 必须是局部变量：递归返回后会污染调用方循环里的深度计数，
+  # 导致同一层存在多个 ZIP 时（如证据内同时含 r2_1.zip 与 r2_1/r1.zip）
+  # 把合法嵌套误判为超深。
+  local root="$1" depth="$2"
   while IFS= read -r -d '' file; do
     rel=${file#"$root"/}
     if path_forbidden "$rel"; then
