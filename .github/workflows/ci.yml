@@ -59,3 +59,8 @@ jobs:
         env:
           R4_HEADLESS_WATCHDOG_SEC: "300"
         run: bash scripts/r4_headless_checks.sh /tmp/craftsman-r4-ci
+
+      - name: R5 headless modular-building authority and companion-save checks
+        env:
+          R5_HEADLESS_WATCHDOG_SEC: "300"
+        run: bash scripts/r5_headless_checks.sh /tmp/craftsman-r5-ci

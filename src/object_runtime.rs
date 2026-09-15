@@ -5,6 +5,7 @@
 
 use crate::app_state::GameState;
 use crate::asset_manifest::AssetManifest;
+use crate::building_runtime::BuildingWorldRes;
 use crate::camera::WorldRes;
 use crate::objects::{ObjectId, ObjectKind, ObjectStore, PlacedObject};
 use crate::picking::{CurrentPickRes, CurrentRayRes};
@@ -178,6 +179,7 @@ fn object_input_system(
     pick: Res<CurrentPickRes>,
     current_ray: Res<CurrentRayRes>,
     world_res: Res<WorldRes>,
+    buildings: Option<Res<BuildingWorldRes>>,
     mut objects: ResMut<ObjectWorldRes>,
     mut ui: ResMut<ObjectUiState>,
 ) {
@@ -208,10 +210,14 @@ fn object_input_system(
 
     if keys.just_pressed(KeyCode::KeyO) {
         ui.selected = current_ray.0.and_then(|ray| {
+            let terrain_t = pick.0.map(|hit| hit.t).unwrap_or(400.0);
+            let building_t = buildings
+                .as_ref()
+                .and_then(|buildings| buildings.store.pick(&ray, 400.0).map(|(_, t)| t))
+                .unwrap_or(400.0);
             objects
                 .store
-                .pick(&ray, 400.0)
-                .filter(|(_, object_t)| pick.0.map(|hit| *object_t <= hit.t + 0.05).unwrap_or(true))
+                .pick(&ray, terrain_t.min(building_t) + 0.05)
                 .map(|(id, _)| id)
         });
         objects.last_message = ui
@@ -249,26 +255,56 @@ fn object_input_system(
         };
         let anchor = hit.place;
         if let Some(id) = ui.moving {
-            match objects
-                .store
-                .move_object(world, id, anchor, ui.yaw_quarters)
-            {
-                Ok(()) => {
-                    objects.dirty = true;
-                    objects.last_message = format!("Moved object {id} to {anchor}");
-                    ui.selected = Some(id);
-                    ui.moving = None;
+            let Some(old) = objects.store.get(id).copied() else {
+                objects.last_message = format!("Move blocked: object {id} is missing");
+                return;
+            };
+            let candidate = PlacedObject {
+                anchor,
+                yaw_quarters: ui.yaw_quarters,
+                ..old
+            };
+            let building_error = buildings
+                .as_ref()
+                .and_then(|buildings| buildings.store.validate_object_record(candidate).err());
+            if let Some(error) = building_error {
+                objects.last_message = format!("Move blocked by building: {error}");
+            } else {
+                match objects
+                    .store
+                    .move_object(world, id, anchor, ui.yaw_quarters)
+                {
+                    Ok(()) => {
+                        objects.dirty = true;
+                        objects.last_message = format!("Moved object {id} to {anchor}");
+                        ui.selected = Some(id);
+                        ui.moving = None;
+                    }
+                    Err(error) => objects.last_message = format!("Move blocked: {error}"),
                 }
-                Err(error) => objects.last_message = format!("Move blocked: {error}"),
             }
         } else {
-            match objects.store.place(world, ui.kind, anchor, ui.yaw_quarters) {
-                Ok(id) => {
-                    objects.dirty = true;
-                    objects.last_message = format!("Placed {} as object {id}", ui.kind.type_id());
-                    ui.selected = Some(id);
+            let candidate = PlacedObject {
+                id: ObjectId(u64::MAX),
+                kind: ui.kind,
+                anchor,
+                yaw_quarters: ui.yaw_quarters,
+            };
+            let building_error = buildings
+                .as_ref()
+                .and_then(|buildings| buildings.store.validate_object_record(candidate).err());
+            if let Some(error) = building_error {
+                objects.last_message = format!("Place blocked by building: {error}");
+            } else {
+                match objects.store.place(world, ui.kind, anchor, ui.yaw_quarters) {
+                    Ok(id) => {
+                        objects.dirty = true;
+                        objects.last_message =
+                            format!("Placed {} as object {id}", ui.kind.type_id());
+                        ui.selected = Some(id);
+                    }
+                    Err(error) => objects.last_message = format!("Place blocked: {error}"),
                 }
-                Err(error) => objects.last_message = format!("Place blocked: {error}"),
             }
         }
     }
@@ -277,6 +313,7 @@ fn object_input_system(
 fn object_gizmo_system(
     pick: Res<CurrentPickRes>,
     world_res: Res<WorldRes>,
+    buildings: Option<Res<BuildingWorldRes>>,
     objects: Res<ObjectWorldRes>,
     ui: Res<ObjectUiState>,
     mut gizmos: Gizmos,
@@ -293,16 +330,20 @@ fn object_gizmo_system(
         return;
     };
     let ignore = ui.moving;
-    let valid = objects
-        .store
-        .validate_candidate(world, ui.kind, hit.place, ui.yaw_quarters, ignore)
-        .is_ok();
     let preview = PlacedObject {
         id: ignore.unwrap_or(ObjectId(u64::MAX)),
         kind: ui.kind,
         anchor: hit.place,
         yaw_quarters: ui.yaw_quarters,
     };
+    let valid = objects
+        .store
+        .validate_candidate(world, ui.kind, hit.place, ui.yaw_quarters, ignore)
+        .is_ok()
+        && buildings
+            .as_ref()
+            .map(|buildings| buildings.store.validate_object_record(preview).is_ok())
+            .unwrap_or(true);
     draw_record_gizmo(
         &mut gizmos,
         preview,

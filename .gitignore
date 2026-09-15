@@ -22,3 +22,10 @@ evidence_r3_*.zip
 *.objects.slot?.tmp-*
 evidence_r4_*/
 evidence_r4_*.zip
+
+# R5 modular-building companion slots.
+*.buildings.slot0
+*.buildings.slot1
+*.buildings.slot?.tmp-*
+evidence_r5_*/
+evidence_r5_*.zip
