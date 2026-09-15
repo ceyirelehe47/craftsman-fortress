@@ -82,6 +82,37 @@ pub fn run() -> AppExit {
         (crate::objects::ObjectStore::new(), None)
     };
 
+    let building_save_path =
+        crate::building_persistence::building_logical_path(Path::new(&cfg.save_path));
+    let (building_store, loaded_building_generation) = if let Some(load_path) =
+        cfg.load_path.as_ref()
+    {
+        let building_load_path =
+            crate::building_persistence::building_logical_path(Path::new(load_path));
+        match crate::building_persistence::load_latest(&building_load_path, &world, &object_store) {
+            Ok(Some(loaded)) => {
+                info!(
+                    "加载建筑存档：{} generation={} components={} hash={:#x}",
+                    loaded.slot_path.display(),
+                    loaded.meta.generation,
+                    loaded.meta.component_count,
+                    loaded.meta.building_semantic_hash
+                );
+                (loaded.store, Some(loaded.meta.generation))
+            }
+            Ok(None) => (crate::buildings::BuildingStore::new(), None),
+            Err(error) => {
+                eprintln!(
+                    "建筑存档加载失败（{}）：{error}",
+                    building_load_path.display()
+                );
+                std::process::exit(5);
+            }
+        }
+    } else {
+        (crate::buildings::BuildingStore::new(), None)
+    };
+
     let asset_root = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
         .join("assets");
@@ -147,16 +178,18 @@ pub fn run() -> AppExit {
             loaded_object_generation,
             manifest_path,
         );
+        crate::building_runtime::plugin(&mut app, building_store, loaded_building_generation);
         crate::editing::plugin(
             &mut app,
             std::path::PathBuf::from(&cfg.save_path),
             object_save_path.clone(),
+            building_save_path.clone(),
             loaded_generation,
         );
     }
 
     info!(
-        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={} 存档路径={} 对象路径={} 加载={:?}",
+        "启动：seed={} 尺寸={}×{}×{} 窗口={}×{} 验收模式={} 存档路径={} 对象路径={} 建筑路径={} 加载={:?}",
         cfg.seed,
         cfg.size.x,
         cfg.size.y,
@@ -166,6 +199,7 @@ pub fn run() -> AppExit {
         acceptance,
         cfg.save_path,
         object_save_path.display(),
+        building_save_path.display(),
         cfg.load_path
     );
     app.run()
@@ -204,7 +238,7 @@ fn spawn_ui_text(mut commands: Commands) {
     ));
     commands.spawn((
         Text::new(
-            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Delete/B terrain · 1/2/3 object · G rotate · P place · O select · M move · X delete · F5 save",
+            "WASD move · R/F up/down · Q/E or LMB-drag rotate · RMB-drag pan · Wheel zoom · Delete/B terrain · 1/2/3 object · G/P/O/M/X object · F1-F4/F6-F9 building · H/J/K/L/Backspace building · PageUp/PageDown level · F5 save",
         ),
         TextFont {
             font_size: FontSize::Px(13.0),
